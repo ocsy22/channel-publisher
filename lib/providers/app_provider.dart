@@ -1,11 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math';
+import 'dart:io';
+// dart:math removed - unused
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:uuid/uuid.dart';
 import '../models/app_models.dart';
+import '../services/ffmpeg_service.dart';
+import '../services/telegram_service.dart';
+import '../services/caption_service.dart';
 import '../utils/io_helper.dart' if (dart.library.html) '../utils/io_helper_web.dart';
 
 class AppProvider extends ChangeNotifier {
@@ -27,6 +33,10 @@ class AppProvider extends ChangeNotifier {
   VideoFile? _selectedVideo;
   VideoFile? get selectedVideo => _selectedVideo;
 
+  // 多选发布用的选中集合
+  final Set<String> _selectedSliceIds = {};
+  Set<String> get selectedSliceIds => _selectedSliceIds;
+
   List<PublishTask> _tasks = [];
   List<PublishTask> get tasks => _tasks;
 
@@ -36,8 +46,13 @@ class AppProvider extends ChangeNotifier {
   bool _isConnecting = false;
   bool get isConnecting => _isConnecting;
 
-  bool _isProcessing = false;
-  bool get isProcessing => _isProcessing;
+  BotInfo? _botInfo;
+  BotInfo? get botInfo => _botInfo;
+
+  bool _ffmpegAvailable = false;
+  bool get ffmpegAvailable => _ffmpegAvailable;
+  String _ffmpegVersion = '检测中...';
+  String get ffmpegVersion => _ffmpegVersion;
 
   String _logOutput = '';
   String get logOutput => _logOutput;
@@ -50,12 +65,33 @@ class AppProvider extends ChangeNotifier {
 
   AppProvider() {
     _loadSettings();
-    _initDemoData();
+    _checkFfmpeg();
   }
 
   // ==================== 导航 ====================
   void setNav(int index) {
     _selectedNav = index;
+    notifyListeners();
+  }
+
+  // ==================== ffmpeg 检测 ====================
+  Future<void> _checkFfmpeg() async {
+    try {
+      _ffmpegAvailable = await FfmpegService.instance.isAvailable();
+      if (_ffmpegAvailable) {
+        _ffmpegVersion = await FfmpegService.instance.getVersion();
+        _addLog('✅ ffmpeg 已检测到');
+      } else {
+        _ffmpegVersion = '未找到';
+        _addLog('⚠️ 未检测到 ffmpeg，视频处理功能不可用');
+        _addLog('💡 请下载 ffmpeg 并放到与 exe 同目录或系统 PATH');
+        _addLog('   下载地址：https://www.gyan.dev/ffmpeg/builds/');
+      }
+    } catch (e) {
+      _ffmpegAvailable = false;
+      _ffmpegVersion = '未找到';
+      _addLog('⚠️ ffmpeg 未找到: $e');
+    }
     notifyListeners();
   }
 
@@ -68,6 +104,12 @@ class AppProvider extends ChangeNotifier {
         _botConfig = BotConfig.fromJson(jsonDecode(configJson));
       }
       _watchFolder = prefs.getString('watch_folder') ?? '';
+      // 加载历史记录
+      final historyJson = prefs.getString('publish_history');
+      if (historyJson != null) {
+        final list = jsonDecode(historyJson) as List;
+        _history = list.map((e) => PublishRecord.fromJson(e)).toList();
+      }
       notifyListeners();
     } catch (e) {
       if (kDebugMode) debugPrint('Load settings error: $e');
@@ -84,8 +126,21 @@ class AppProvider extends ChangeNotifier {
     }
   }
 
+  Future<void> _saveHistory() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        'publish_history',
+        jsonEncode(_history.take(200).map((r) => r.toJson()).toList()),
+      );
+    } catch (_) {}
+  }
+
   void updateBotConfig(BotConfig config) {
     _botConfig = config;
+    // 重置连接状态
+    _botConfig.isConnected = false;
+    _botInfo = null;
     saveSettings();
     notifyListeners();
   }
@@ -93,31 +148,49 @@ class AppProvider extends ChangeNotifier {
   void setWatchFolder(String path) {
     _watchFolder = path;
     saveSettings();
-    _addLog('📁 监控文件夹已设置: $path');
+    _addLog('📁 监控文件夹: $path');
     notifyListeners();
   }
 
-  // ==================== Bot 连接 ====================
+  // ==================== Bot 连接（真实 API）====================
   Future<bool> testBotConnection() async {
-    if (_botConfig.botToken.isEmpty) return false;
+    if (_botConfig.botToken.isEmpty) {
+      _addLog('❌ 请先填写 Bot Token');
+      return false;
+    }
     _isConnecting = true;
     notifyListeners();
 
-    await Future.delayed(const Duration(seconds: 2));
+    try {
+      _addLog('🔗 正在连接 Telegram...');
+      final info = await TelegramService.instance.testConnection(_botConfig.botToken);
+      _botInfo = info;
+      _botConfig.isConnected = true;
+      _addLog('✅ Bot 连接成功！Bot: ${info?.username} (${info?.firstName})');
 
-    // 模拟连接测试
-    final success = _botConfig.botToken.contains(':') && _botConfig.botToken.length > 20;
-    _botConfig.isConnected = success;
-    _isConnecting = false;
+      // 获取频道信息
+      if (_botConfig.channelId.isNotEmpty) {
+        final chInfo = await TelegramService.instance.getChannelInfo(
+          _botConfig.botToken,
+          _botConfig.channelId,
+        );
+        if (chInfo != null) {
+          _botConfig.channelName = chInfo.title;
+          _addLog('📢 频道: ${chInfo.title} (${chInfo.id})');
+        }
+      }
 
-    if (success) {
-      _addLog('✅ Bot 连接成功！频道: ${_botConfig.channelName}');
-    } else {
-      _addLog('❌ Bot 连接失败，请检查 Token');
+      saveSettings();
+      _isConnecting = false;
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _botConfig.isConnected = false;
+      _addLog('❌ 连接失败: $e');
+      _isConnecting = false;
+      notifyListeners();
+      return false;
     }
-    saveSettings();
-    notifyListeners();
-    return success;
   }
 
   // ==================== 视频管理 ====================
@@ -126,13 +199,10 @@ class AppProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 从 FilePicker 结果添加视频（兼容 Web + 桌面）
   void addVideosFromPicker(List<PlatformFile> files) {
-    final random = Random();
     int added = 0;
     for (final file in files) {
       final fileName = file.name;
-      // Web 上 path 为 null，用 name 做唯一标识；桌面用 path
       final key = file.path ?? 'web://$fileName';
       final exists = _videos.any((v) => v.path == key);
       if (!exists) {
@@ -140,230 +210,269 @@ class AppProvider extends ChangeNotifier {
           id: _uuid.v4(),
           path: key,
           fileName: fileName,
-          duration: 60 + random.nextDouble() * 300,
-          fileSize: file.size > 0 ? file.size : (10 + random.nextInt(500)) * 1024 * 1024,
+          duration: 0,
+          fileSize: file.size,
         );
         _videos.add(video);
         added++;
-        _addLog('➕ 添加视频: $fileName');
+        _addLog('➕ 添加: $fileName');
+        // 异步获取真实视频信息
+        _loadVideoInfo(video);
       }
     }
-    if (added > 0) {
-      // 自动选中第一个刚加入的视频
-      if (_selectedVideo == null) {
-        _selectedVideo = _videos.first;
-      }
-    }
-    notifyListeners();
-  }
-
-  /// 扫描文件夹（桌面：读真实文件；Web：模拟）
-  Future<void> scanFolder(String folderPath) async {
-    setWatchFolder(folderPath);
-    final videoExts = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v'];
-    final random = Random();
-    int added = 0;
-
-    if (!kIsWeb) {
-      // 桌面：真实扫描文件夹
-      try {
-        // 动态导入 dart:io 只在非 web
-        await _scanRealFolder(folderPath, videoExts, random);
-        return;
-      } catch (e) {
-        _addLog('⚠️ 扫描文件夹出错: $e');
-      }
-    }
-
-    // Web 回退：演示模式
-    final demoFiles = [
-      'video_001.mp4', 'video_002.mp4', 'clip_003.mp4',
-      'recording_004.mp4', 'export_005.mp4',
-    ];
-    for (final name in demoFiles) {
-      final key = '$folderPath/$name';
-      if (!_videos.any((v) => v.path == key)) {
-        _videos.add(VideoFile(
-          id: _uuid.v4(),
-          path: key,
-          fileName: name,
-          duration: 60 + random.nextDouble() * 300,
-          fileSize: (30 + random.nextInt(400)) * 1024 * 1024,
-        ));
-        added++;
-      }
-    }
-    if (added > 0 && _selectedVideo == null) _selectedVideo = _videos.first;
-    _addLog('📁 扫描完成（演示模式），添加了 $added 个视频');
-    notifyListeners();
-  }
-
-  Future<void> _scanRealFolder(String folderPath, List<String> exts, Random random) async {
-    int added = 0;
-    await for (final entityPath in listDirectory(folderPath)) {
-      final name = entityPath.split('/').last.split('\\').last;
-      final ext = name.contains('.') ? '.${name.split('.').last.toLowerCase()}' : '';
-      if (exts.contains(ext)) {
-        if (!_videos.any((v) => v.path == entityPath)) {
-          _videos.add(VideoFile(
-            id: _uuid.v4(),
-            path: entityPath,
-            fileName: name,
-            duration: 60 + random.nextDouble() * 300,
-            fileSize: (30 + random.nextInt(400)) * 1024 * 1024,
-          ));
-          added++;
-          _addLog('➕ 发现视频: $name');
-        }
-      }
-    }
-    if (added > 0 && _selectedVideo == null) _selectedVideo = _videos.first;
-    _addLog('📁 文件夹扫描完成，共找到 $added 个视频文件');
-    notifyListeners();
-  }
-
-  void addVideos(List<String> paths) {
-    final random = Random();
-    for (final path in paths) {
-      final fileName = path.split('/').last.split('\\').last;
-      final exists = _videos.any((v) => v.path == path);
-      if (!exists) {
-        final video = VideoFile(
-          id: _uuid.v4(),
-          path: path,
-          fileName: fileName,
-          duration: 60 + random.nextDouble() * 300,
-          fileSize: (10 + random.nextInt(500)) * 1024 * 1024,
-        );
-        _videos.add(video);
-        _addLog('➕ 添加视频: $fileName');
-      }
-    }
-    if (_selectedVideo == null && _videos.isNotEmpty) {
+    if (added > 0 && _selectedVideo == null) {
       _selectedVideo = _videos.first;
     }
     notifyListeners();
   }
 
+  Future<void> _loadVideoInfo(VideoFile video) async {
+    if (!_ffmpegAvailable || video.path.startsWith('web://')) return;
+    try {
+      final info = await FfmpegService.instance.getVideoInfo(video.path);
+      video.duration = info.duration;
+      video.fileSize = info.fileSize > 0 ? info.fileSize : video.fileSize;
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  Future<void> scanFolder(String folderPath) async {
+    setWatchFolder(folderPath);
+    final videoExts = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.ts'];
+    int added = 0;
+
+    if (!kIsWeb) {
+      try {
+        await for (final entityPath in listDirectory(folderPath)) {
+          final name = entityPath.split('/').last.split('\\').last;
+          final ext = name.contains('.') ? '.${name.split('.').last.toLowerCase()}' : '';
+          if (videoExts.contains(ext) && !_videos.any((v) => v.path == entityPath)) {
+            final video = VideoFile(
+              id: _uuid.v4(),
+              path: entityPath,
+              fileName: name,
+              duration: 0,
+              fileSize: 0,
+            );
+            try {
+              final stat = await File(entityPath).stat();
+              video.fileSize = stat.size;
+            } catch (_) {}
+            _videos.add(video);
+            added++;
+            _addLog('➕ 发现: $name');
+            _loadVideoInfo(video);
+          }
+        }
+        if (added > 0 && _selectedVideo == null) _selectedVideo = _videos.first;
+        _addLog('📁 扫描完成，发现 $added 个视频');
+        notifyListeners();
+        return;
+      } catch (e) {
+        _addLog('⚠️ 扫描失败: $e');
+      }
+    }
+
+    _addLog('⚠️ Web 模式不支持文件夹扫描，请直接添加视频文件');
+    notifyListeners();
+  }
+
   void removeVideo(String id) {
     _videos.removeWhere((v) => v.id == id);
-    if (_selectedVideo?.id == id) _selectedVideo = null;
+    if (_selectedVideo?.id == id) {
+      _selectedVideo = _videos.isNotEmpty ? _videos.first : null;
+    }
     notifyListeners();
   }
 
-  void selectAllVideos() {
-    _selectedVideo = _videos.isNotEmpty ? _videos.first : null;
+  // ==================== 多选管理 ====================
+  void toggleSliceSelection(String sliceId) {
+    if (_selectedSliceIds.contains(sliceId)) {
+      _selectedSliceIds.remove(sliceId);
+    } else {
+      _selectedSliceIds.add(sliceId);
+    }
     notifyListeners();
   }
 
-  // ==================== 视频处理 ====================
+  void selectAllSlices(VideoFile video) {
+    for (final s in video.slices) {
+      _selectedSliceIds.add(s.id);
+    }
+    notifyListeners();
+  }
+
+  void clearSliceSelection() {
+    _selectedSliceIds.clear();
+    notifyListeners();
+  }
+
+  bool isSliceSelected(String sliceId) => _selectedSliceIds.contains(sliceId);
+
+  // ==================== 视频处理（真实 ffmpeg）====================
   Future<void> processVideo(VideoFile video) async {
     if (video.status == VideoStatus.processing) return;
+    if (!_ffmpegAvailable) {
+      _addLog('❌ ffmpeg 未安装，无法处理视频');
+      _addLog('💡 请下载 ffmpeg.exe 放到程序同目录');
+      video.status = VideoStatus.failed;
+      video.errorMessage = 'ffmpeg 未找到，请安装后重试';
+      notifyListeners();
+      return;
+    }
 
     video.status = VideoStatus.processing;
     video.progress = 0;
+    video.slices.clear();
     notifyListeners();
 
     _addLog('🎬 开始处理: ${video.fileName}');
 
-    // 模拟切片
-    if (video.sliceConfig.autoSlice) {
-      await _simulateSlicing(video);
-    }
+    try {
+      // 输出目录
+      final appDir = await getApplicationSupportDirectory();
+      final outputDir = p.join(appDir.path, 'slices', video.id);
+      final coverDir = p.join(appDir.path, 'covers', video.id);
 
-    // 模拟封面生成
-    if (video.sliceConfig.generateCover) {
-      await _simulateCoverGeneration(video);
-    }
+      final baseName = video.fileName.replaceAll(RegExp(r'\.[^.]+$'), '');
 
-    // 模拟文案生成
-    if (video.sliceConfig.generateCaption) {
-      await _simulateCaptionGeneration(video);
-    }
+      // 1. 视频切片
+      _addLog('✂️ 开始切片 (每片 ${video.sliceConfig.sliceDuration.toInt()} 秒)...');
+      final sliceResults = await FfmpegService.instance.sliceVideo(
+        inputPath: video.path,
+        sliceDuration: video.sliceConfig.sliceDuration,
+        outputDir: outputDir,
+        baseName: baseName,
+        onProgress: (current, total, status) {
+          video.progress = current / total * 0.6;
+          _addLog('  $status');
+          notifyListeners();
+        },
+      );
 
-    video.status = VideoStatus.ready;
-    video.progress = 1.0;
-    _addLog('✅ 处理完成: ${video.fileName}，共 ${video.slices.length} 个片段');
+      if (sliceResults.isEmpty) {
+        throw Exception('切片结果为空，请检查视频文件');
+      }
+
+      _addLog('✅ 切片完成: ${sliceResults.length} 个片段');
+
+      // 2. 为每个片段生成封面+文案
+      for (int i = 0; i < sliceResults.length; i++) {
+        final slice = sliceResults[i];
+        video.progress = 0.6 + (i / sliceResults.length) * 0.4;
+        notifyListeners();
+
+        // 生成封面
+        String? coverPath;
+        if (video.sliceConfig.generateCover) {
+          final coverOutput = p.join(coverDir, 'cover_${i + 1}.jpg');
+          coverPath = await FfmpegService.instance.extractCover(
+            videoPath: slice.path,
+            outputPath: coverOutput,
+            watermarkText: video.sliceConfig.addWatermark
+                ? video.sliceConfig.watermarkText
+                : null,
+          );
+          if (coverPath != null) {
+            _addLog('  🖼️ 封面生成: ${p.basename(coverPath)}');
+          }
+        }
+
+        // 生成文案
+        CaptionResult? captionResult;
+        if (video.sliceConfig.generateCaption) {
+          captionResult = await CaptionService.instance.generateCaption(
+            fileName: video.fileName,
+            mode: video.sliceConfig.captionMode,
+            apiKey: _botConfig.aiApiKey,
+            model: _botConfig.aiModel,
+            customPrompt: video.sliceConfig.captionPrompt.isNotEmpty
+                ? video.sliceConfig.captionPrompt
+                : null,
+            partIndex: i + 1,
+            totalParts: sliceResults.length,
+          );
+        }
+
+        final videoSlice = VideoSlice(
+          id: _uuid.v4(),
+          originalVideoId: video.id,
+          fileName: slice.fileName,
+          realPath: slice.path,
+          startTime: slice.startTime,
+          endTime: slice.endTime,
+          duration: slice.duration,
+          coverPath: coverPath,
+          title: captionResult?.title,
+          caption: captionResult?.caption,
+          status: VideoStatus.ready,
+          progress: 1.0,
+        );
+        video.slices.add(videoSlice);
+      }
+
+      video.status = VideoStatus.ready;
+      video.progress = 1.0;
+      _addLog('✅ ${video.fileName} 处理完成！共 ${video.slices.length} 个片段');
+    } catch (e) {
+      video.status = VideoStatus.failed;
+      video.errorMessage = e.toString();
+      _addLog('❌ 处理失败: $e');
+    }
     notifyListeners();
-  }
-
-  Future<void> _simulateSlicing(VideoFile video) async {
-    final sliceCount = (video.duration / video.sliceConfig.sliceDuration).ceil();
-    video.slices.clear();
-
-    for (int i = 0; i < sliceCount; i++) {
-      final start = i * video.sliceConfig.sliceDuration;
-      final end = min(start + video.sliceConfig.sliceDuration, video.duration);
-      video.slices.add(VideoSlice(
-        id: _uuid.v4(),
-        originalVideoId: video.id,
-        fileName: '${video.fileName.replaceAll(RegExp(r'\.[^.]+$'), '')}_part${i + 1}.mp4',
-        startTime: start,
-        endTime: end,
-        duration: end - start,
-        status: VideoStatus.processing,
-        progress: 0,
-      ));
-
-      video.progress = (i + 1) / sliceCount * 0.4;
-      notifyListeners();
-      await Future.delayed(const Duration(milliseconds: 300));
-    }
-    _addLog('✂️ 切片完成: ${video.slices.length} 个片段');
-  }
-
-  Future<void> _simulateCoverGeneration(VideoFile video) async {
-    final sampleTitles = [
-      '精彩视频第{}集 | 不容错过的精彩瞬间',
-      '独家内容 | 第{}部分完整版',
-      '热门视频{}P | 高清资源分享',
-      '视频合集第{}期 | 精选内容推荐',
-    ];
-    final random = Random();
-
-    for (int i = 0; i < video.slices.length; i++) {
-      video.slices[i].coverPath = 'assets/cover_placeholder.jpg';
-      video.slices[i].title = sampleTitles[random.nextInt(sampleTitles.length)]
-          .replaceAll('{}', '${i + 1}');
-
-      video.progress = 0.4 + (i + 1) / video.slices.length * 0.3;
-      notifyListeners();
-      await Future.delayed(const Duration(milliseconds: 200));
-    }
-    _addLog('🖼️ 封面生成完成');
-  }
-
-  Future<void> _simulateCaptionGeneration(VideoFile video) async {
-    final sampleCaptions = [
-      '🔥 精彩内容来袭！这是一段令人叹为观止的视频，包含了最新、最热、最精彩的内容。不要错过每一个精彩瞬间！\n\n📌 关注频道获取更多精彩内容\n#视频 #精彩 #推荐',
-      '💎 独家高清内容分享！本期视频为您带来最优质的内容体验，欢迎转发分享给更多朋友！\n\n⭐ 喜欢请转发支持\n#独家 #高清 #分享',
-      '🎯 今日精选内容！每天为您精心挑选最值得观看的视频内容，让您的碎片时间物有所值！\n\n👉 点击加入我们的频道\n#精选 #每日更新 #推荐',
-    ];
-    final random = Random();
-
-    for (int i = 0; i < video.slices.length; i++) {
-      video.slices[i].caption = sampleCaptions[random.nextInt(sampleCaptions.length)];
-      video.slices[i].status = VideoStatus.ready;
-      video.slices[i].progress = 1.0;
-
-      video.progress = 0.7 + (i + 1) / video.slices.length * 0.3;
-      notifyListeners();
-      await Future.delayed(const Duration(milliseconds: 250));
-    }
-    _addLog('📝 文案生成完成');
   }
 
   Future<void> processAllPending() async {
     final pending = _videos.where((v) => v.status == VideoStatus.pending).toList();
+    _addLog('🚀 开始批量处理 ${pending.length} 个视频...');
     for (final video in pending) {
       await processVideo(video);
     }
+    _addLog('✅ 批量处理完成');
   }
 
-  // ==================== 发布 ====================
+  // ==================== 测试发布 ====================
+  Future<bool> sendTestMessage() async {
+    if (!_botConfig.isConnected || _botConfig.channelId.isEmpty) {
+      _addLog('❌ 请先连接Bot并填写频道ID');
+      return false;
+    }
+    try {
+      _addLog('📤 发送测试消息...');
+      final msg = await TelegramService.instance.sendMessage(
+        token: _botConfig.botToken,
+        chatId: _botConfig.channelId,
+        text: '✅ <b>Channel Publisher 连接测试</b>\n\n'
+            '🤖 Bot 工作正常！\n'
+            '📢 频道: ${_botConfig.channelName.isNotEmpty ? _botConfig.channelName : _botConfig.channelId}\n'
+            '⏰ 时间: ${DateTime.now().toString().substring(0, 16)}\n\n'
+            '现在可以开始使用视频切片和自动发布功能了 🎬',
+        parseMode: 'HTML',
+      );
+      _addLog('✅ 测试消息发送成功! msgId=${msg.messageId}');
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _addLog('❌ 测试消息失败: $e');
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // ==================== 发布（真实 Telegram API）====================
+
+  /// 发布单个切片
   Future<void> publishSlice(VideoSlice slice, VideoFile video) async {
     if (!_botConfig.isConnected) {
-      _addLog('❌ 未连接 Bot，请先配置并连接');
+      _addLog('❌ 请先连接 Telegram Bot');
+      return;
+    }
+    if (slice.realPath == null || slice.realPath!.isEmpty) {
+      _addLog('❌ 视频文件路径为空，请先处理视频');
+      return;
+    }
+    if (!await File(slice.realPath!).exists()) {
+      _addLog('❌ 视频文件不存在: ${slice.realPath}');
       return;
     }
     if (slice.status == VideoStatus.publishing || slice.status == VideoStatus.published) return;
@@ -377,200 +486,325 @@ class AppProvider extends ChangeNotifier {
       videoFileName: slice.fileName,
       status: TaskStatus.running,
       type: TaskType.publish,
-      message: '发送到 Telegram...',
+      message: '准备上传...',
     );
     _tasks.insert(0, task);
     notifyListeners();
 
-    _addLog('📤 正在发布: ${slice.fileName}');
+    try {
+      _addLog('📤 发布: ${slice.fileName} → ${_botConfig.channelId}');
 
-    // 模拟发布过程
-    for (int i = 0; i <= 10; i++) {
-      await Future.delayed(const Duration(milliseconds: 300));
-      task.progress = i / 10;
-      task.message = i < 5 ? '上传视频中... ${(i * 10)}%' : '发送消息... ${((i - 5) * 20)}%';
-      notifyListeners();
+      final msg = await TelegramService.instance.sendVideo(
+        token: _botConfig.botToken,
+        chatId: _botConfig.channelId,
+        videoPath: slice.realPath!,
+        coverPath: slice.coverPath,
+        caption: _buildCaption(slice),
+        parseMode: 'HTML',
+        onProgress: (sent, total) {
+          if (total > 0) {
+            task.progress = sent / total;
+            task.message = '上传中 ${(sent / total * 100).toInt()}%';
+            notifyListeners();
+          }
+        },
+      );
+
+      slice.status = VideoStatus.published;
+      slice.publishedAt = DateTime.now();
+      task.status = TaskStatus.done;
+      task.message = '发布成功 ✓ (msgId: ${msg.messageId})';
+      task.completedAt = DateTime.now();
+      task.progress = 1.0;
+
+      final record = PublishRecord(
+        id: _uuid.v4(),
+        channelId: _botConfig.channelId,
+        channelName: _botConfig.channelName.isNotEmpty ? _botConfig.channelName : _botConfig.channelId,
+        videoFileName: slice.fileName,
+        title: slice.title ?? '',
+        caption: slice.caption ?? '',
+        messageId: msg.messageId,
+        publishedAt: DateTime.now(),
+      );
+      _history.insert(0, record);
+      _saveHistory();
+
+      _addLog('✅ 发布成功! msgId=${msg.messageId}');
+    } catch (e) {
+      slice.status = VideoStatus.failed;
+      task.status = TaskStatus.error;
+      task.message = '发布失败: $e';
+      _addLog('❌ 发布失败: $e');
+    }
+    notifyListeners();
+  }
+
+  /// 多选发布（共用一张封面）
+  Future<void> publishSelectedSlices({
+    String? sharedCoverPath,
+    bool asMediaGroup = false,
+  }) async {
+    if (!_botConfig.isConnected) {
+      _addLog('❌ 请先连接 Telegram Bot');
+      return;
+    }
+    if (_selectedSliceIds.isEmpty) {
+      _addLog('⚠️ 请先选择要发布的片段');
+      return;
     }
 
-    // 模拟成功
-    slice.status = VideoStatus.published;
-    slice.publishedAt = DateTime.now();
-    task.status = TaskStatus.done;
-    task.message = '发布成功 ✓';
-    task.completedAt = DateTime.now();
+    // 收集所有选中的切片
+    final selectedSlices = <MapEntry<VideoSlice, VideoFile>>[];
+    for (final video in _videos) {
+      for (final slice in video.slices) {
+        if (_selectedSliceIds.contains(slice.id)) {
+          selectedSlices.add(MapEntry(slice, video));
+        }
+      }
+    }
 
-    final record = PublishRecord(
-      id: _uuid.v4(),
-      channelId: _botConfig.channelId,
-      channelName: _botConfig.channelName.isNotEmpty ? _botConfig.channelName : '我的频道',
-      videoFileName: slice.fileName,
-      title: slice.title ?? '无标题',
-      caption: slice.caption ?? '',
-      messageId: Random().nextInt(99999),
-      publishedAt: DateTime.now(),
-      views: Random().nextInt(1000),
-    );
-    _history.insert(0, record);
+    if (selectedSlices.isEmpty) return;
 
-    _addLog('✅ 发布成功: ${slice.fileName} → ${record.channelName}');
+    _addLog('📤 开始多选发布 ${selectedSlices.length} 个片段...');
+
+    if (asMediaGroup && selectedSlices.length <= 10) {
+      // 媒体组发布（Telegram 最多10个）
+      await _publishAsMediaGroup(selectedSlices, sharedCoverPath);
+    } else {
+      // 逐个发布
+      for (final entry in selectedSlices) {
+        // 如果有共用封面，覆盖单个封面
+        if (sharedCoverPath != null) {
+          entry.key.coverPath = sharedCoverPath;
+        }
+        await publishSlice(entry.key, entry.value);
+        // 发布间隔
+        if (_botConfig.publishInterval > 0 && entry != selectedSlices.last) {
+          _addLog('⏱️ 等待 ${_botConfig.publishInterval} 秒...');
+          await Future.delayed(Duration(seconds: _botConfig.publishInterval));
+        }
+      }
+    }
+
+    _selectedSliceIds.clear();
+    notifyListeners();
+    _addLog('✅ 多选发布完成');
+  }
+
+  Future<void> _publishAsMediaGroup(
+    List<MapEntry<VideoSlice, VideoFile>> slices,
+    String? sharedCoverPath,
+  ) async {
+    final mediaItems = <MediaItem>[];
+    for (int i = 0; i < slices.length; i++) {
+      final slice = slices[i].key;
+      if (slice.realPath == null || !await File(slice.realPath!).exists()) continue;
+      mediaItems.add(MediaItem(
+        filePath: slice.realPath!,
+        coverPath: i == 0 ? (sharedCoverPath ?? slice.coverPath) : null,
+        type: MediaType.video,
+      ));
+    }
+
+    if (mediaItems.isEmpty) {
+      _addLog('❌ 没有有效的视频文件');
+      return;
+    }
+
+    try {
+      // 取第一个片段的文案
+      final firstSlice = slices.first.key;
+      final caption = _buildCaption(firstSlice);
+
+      _addLog('📤 发送媒体组 (${mediaItems.length} 个)...');
+      final msgs = await TelegramService.instance.sendMediaGroup(
+        token: _botConfig.botToken,
+        chatId: _botConfig.channelId,
+        items: mediaItems,
+        caption: caption,
+      );
+
+      for (int i = 0; i < slices.length && i < msgs.length; i++) {
+        final slice = slices[i].key;
+        slice.status = VideoStatus.published;
+        slice.publishedAt = DateTime.now();
+        _history.insert(0, PublishRecord(
+          id: _uuid.v4(),
+          channelId: _botConfig.channelId,
+          channelName: _botConfig.channelName.isNotEmpty ? _botConfig.channelName : _botConfig.channelId,
+          videoFileName: slice.fileName,
+          title: slice.title ?? '',
+          caption: caption,
+          messageId: msgs[i].messageId,
+          publishedAt: DateTime.now(),
+        ));
+      }
+      _saveHistory();
+      _addLog('✅ 媒体组发布成功，共 ${msgs.length} 条消息');
+    } catch (e) {
+      _addLog('❌ 媒体组发布失败: $e');
+    }
     notifyListeners();
   }
 
   Future<void> publishAllReady() async {
+    final allReady = <MapEntry<VideoSlice, VideoFile>>[];
     for (final video in _videos) {
       for (final slice in video.slices) {
         if (slice.status == VideoStatus.ready) {
-          await publishSlice(slice, video);
-          if (_botConfig.publishInterval > 0) {
-            _addLog('⏱️ 等待 ${_botConfig.publishInterval} 秒后继续...');
-            await Future.delayed(Duration(seconds: _botConfig.publishInterval ~/ 10));
-          }
+          allReady.add(MapEntry(slice, video));
         }
+      }
+    }
+    if (allReady.isEmpty) {
+      _addLog('⚠️ 没有已就绪的片段');
+      return;
+    }
+    _addLog('🚀 发布所有就绪片段: ${allReady.length} 个');
+    for (final entry in allReady) {
+      await publishSlice(entry.key, entry.value);
+      if (_botConfig.publishInterval > 0) {
+        await Future.delayed(Duration(seconds: _botConfig.publishInterval));
       }
     }
   }
 
-  void updateSliceTitle(String sliceId, String title) {
-    for (final video in _videos) {
-      for (final slice in video.slices) {
-        if (slice.id == sliceId) {
-          slice.title = title;
-          notifyListeners();
-          return;
-        }
-      }
+  String _buildCaption(VideoSlice slice) {
+    final parts = <String>[];
+    if (slice.title != null && slice.title!.isNotEmpty) {
+      parts.add('<b>${slice.title}</b>');
     }
+    if (slice.caption != null && slice.caption!.isNotEmpty) {
+      parts.add(slice.caption!);
+    }
+    return parts.join('\n\n');
+  }
+
+  // ==================== 文案编辑 ====================
+  void updateSliceTitle(String sliceId, String title) {
+    _forEachSlice(sliceId, (s) => s.title = title);
   }
 
   void updateSliceCaption(String sliceId, String caption) {
+    _forEachSlice(sliceId, (s) => s.caption = caption);
+  }
+
+  void updateSliceCover(String sliceId, String coverPath) {
+    _forEachSlice(sliceId, (s) => s.coverPath = coverPath);
+  }
+
+  void _forEachSlice(String sliceId, void Function(VideoSlice) fn) {
     for (final video in _videos) {
       for (final slice in video.slices) {
         if (slice.id == sliceId) {
-          slice.caption = caption;
+          fn(slice);
           notifyListeners();
           return;
         }
       }
+    }
+  }
+
+  Future<void> regenerateCaption(VideoSlice slice) async {
+    _addLog('🤖 AI 重新生成文案...');
+    try {
+      final video = _videos.firstWhere((v) => v.id == slice.originalVideoId);
+      final result = await CaptionService.instance.generateCaption(
+        fileName: video.fileName,
+        mode: video.sliceConfig.captionMode,
+        apiKey: _botConfig.aiApiKey,
+        model: _botConfig.aiModel,
+        customPrompt: video.sliceConfig.captionPrompt.isNotEmpty
+            ? video.sliceConfig.captionPrompt
+            : null,
+      );
+      slice.title = result.title;
+      slice.caption = result.caption;
+      _addLog('✅ 文案已更新');
+    } catch (e) {
+      _addLog('❌ 文案生成失败: $e');
+    }
+    notifyListeners();
+  }
+
+  /// 单独重新生成标题
+  Future<void> regenerateTitle(VideoSlice slice) async {
+    _addLog('🤖 AI 重新生成标题...');
+    try {
+      final video = _videos.firstWhere((v) => v.id == slice.originalVideoId);
+      final result = await CaptionService.instance.generateCaption(
+        fileName: video.fileName,
+        mode: video.sliceConfig.captionMode,
+        apiKey: _botConfig.aiApiKey,
+        model: _botConfig.aiModel,
+        customPrompt: video.sliceConfig.captionPrompt.isNotEmpty
+            ? video.sliceConfig.captionPrompt
+            : null,
+      );
+      slice.title = result.title;
+      _addLog('✅ 标题已更新: ${result.title}');
+    } catch (e) {
+      _addLog('❌ 标题生成失败: $e');
+    }
+    notifyListeners();
+  }
+
+  /// 切换成人/普通模式并重新生成文案
+  Future<void> toggleCaptionMode(VideoSlice slice) async {
+    final video = _videos.firstWhere(
+      (v) => v.id == slice.originalVideoId,
+      orElse: () => _videos.first,
+    );
+    // 切换模式
+    final newMode = video.sliceConfig.captionMode == CaptionMode.adult
+        ? CaptionMode.normal
+        : CaptionMode.adult;
+    video.sliceConfig.captionMode = newMode;
+    _addLog('🔄 切换文案模式为: ${newMode == CaptionMode.adult ? "成人模式🔞" : "普通模式"}');
+    notifyListeners();
+    // 重新生成文案
+    await regenerateCaption(slice);
+  }
+
+  /// 手动设置封面路径
+  Future<void> changeCover(String sliceId) async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.image,
+        allowMultiple: false,
+      );
+      if (result != null && result.files.isNotEmpty) {
+        final path = result.files.first.path;
+        if (path != null) {
+          _forEachSlice(sliceId, (s) => s.coverPath = path);
+          _addLog('🖼️ 封面已更新');
+        }
+      }
+    } catch (e) {
+      _addLog('❌ 选择封面失败: $e');
     }
   }
 
   void updateSliceConfig(String videoId, SliceConfig config) {
-    final video = _videos.firstWhere((v) => v.id == videoId, orElse: () => throw Exception());
-    video.sliceConfig = config;
-    notifyListeners();
+    try {
+      final video = _videos.firstWhere((v) => v.id == videoId);
+      video.sliceConfig = config;
+      notifyListeners();
+    } catch (_) {}
   }
 
   // ==================== 日志 ====================
   void _addLog(String message) {
-    final time = DateTime.now();
-    final timeStr = '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}:${time.second.toString().padLeft(2, '0')}';
-    _logOutput = '[$timeStr] $message\n$_logOutput';
-    if (_logOutput.length > 5000) {
-      _logOutput = _logOutput.substring(0, 5000);
-    }
+    final now = DateTime.now();
+    final t = '${now.hour.toString().padLeft(2,'0')}:${now.minute.toString().padLeft(2,'0')}:${now.second.toString().padLeft(2,'0')}';
+    _logOutput = '[$t] $message\n$_logOutput';
+    if (_logOutput.length > 8000) _logOutput = _logOutput.substring(0, 8000);
     notifyListeners();
   }
 
   void clearLog() {
     _logOutput = '';
-    notifyListeners();
-  }
-
-  // ==================== 演示数据 ====================
-  void _initDemoData() {
-    final random = Random();
-    final sampleFiles = [
-      '精彩合集_第01期.mp4',
-      '独家内容_高清版.mp4',
-      '热门视频_20240315.mp4',
-      '频道精选_周末特辑.mp4',
-    ];
-
-    for (int i = 0; i < sampleFiles.length; i++) {
-      final video = VideoFile(
-        id: _uuid.v4(),
-        path: '/videos/${sampleFiles[i]}',
-        fileName: sampleFiles[i],
-        duration: 120 + random.nextDouble() * 240,
-        fileSize: (50 + random.nextInt(300)) * 1024 * 1024,
-        status: i == 0 ? VideoStatus.ready : i == 1 ? VideoStatus.published : VideoStatus.pending,
-      );
-
-      if (video.status == VideoStatus.ready || video.status == VideoStatus.published) {
-        final sliceCount = 2 + random.nextInt(3);
-        for (int j = 0; j < sliceCount; j++) {
-          final slice = VideoSlice(
-            id: _uuid.v4(),
-            originalVideoId: video.id,
-            fileName: '${sampleFiles[i].replaceAll('.mp4', '')}_part${j + 1}.mp4',
-            startTime: j * 60.0,
-            endTime: (j + 1) * 60.0,
-            duration: 60,
-            title: '精彩视频第 ${j + 1} 集 | 不容错过',
-            caption: '🔥 精彩内容来袭！关注获取更多\n#视频 #精彩 #推荐',
-            status: video.status == VideoStatus.published
-                ? VideoStatus.published
-                : VideoStatus.ready,
-            progress: 1.0,
-          );
-          if (slice.status == VideoStatus.published) {
-            slice.publishedAt = DateTime.now().subtract(Duration(hours: random.nextInt(24)));
-          }
-          video.slices.add(slice);
-        }
-      }
-      _videos.add(video);
-    }
-
-    // 演示历史
-    final channels = ['@my_channel', '@tech_channel'];
-    for (int i = 0; i < 8; i++) {
-      _history.add(PublishRecord(
-        id: _uuid.v4(),
-        channelId: channels[i % 2],
-        channelName: i % 2 == 0 ? '我的主频道' : '技术分享频道',
-        videoFileName: '视频片段_${i + 1}.mp4',
-        title: '精彩内容第 ${i + 1} 期',
-        caption: '精彩内容，欢迎关注！',
-        messageId: 10000 + i,
-        publishedAt: DateTime.now().subtract(Duration(hours: i * 3 + random.nextInt(3))),
-        views: random.nextInt(5000) + 100,
-        forwards: random.nextInt(200),
-      ));
-    }
-
-    _addLog('🚀 Channel Publisher 已启动');
-    _addLog('💡 提示：请在设置页面配置 Telegram Bot Token 和频道 ID');
-  }
-
-  // ==================== AI 重新生成 ====================
-  Future<void> regenerateCaption(VideoSlice slice) async {
-    _addLog('🤖 AI 重新生成文案中...');
-    await Future.delayed(const Duration(seconds: 2));
-
-    final samples = [
-      '🌟 超精彩内容！本视频带来了独特的视角和深度内容，每一帧都值得细细品味。立即观看，不要错过！\n\n📲 关注我们，每天更新优质内容\n#精彩 #推荐 #必看',
-      '💥 爆款内容来袭！数万人已经观看，你还在等什么？点击立即观看，感受不一样的精彩！\n\n🔔 开启通知，不错过每次更新\n#热门 #爆款 #推荐',
-      '✨ 品质保证！我们精心为您筛选最优质的内容，只为给您最好的观看体验。\n\n👍 觉得好看请转发支持\n#品质 #优选 #推荐',
-    ];
-
-    slice.caption = samples[Random().nextInt(samples.length)];
-    _addLog('✅ 文案重新生成完成');
-    notifyListeners();
-  }
-
-  Future<void> regenerateTitle(VideoSlice slice) async {
-    _addLog('🤖 AI 重新生成标题中...');
-    await Future.delayed(const Duration(seconds: 1));
-
-    final titles = [
-      '🔥 今日精选 | 超高质量内容不容错过',
-      '💎 独家内容 | ${DateTime.now().month}月最热视频',
-      '⭐ 精品推荐 | 数千人已转发的爆款内容',
-      '🎯 必看内容 | 质量保证绝不让你失望',
-    ];
-    slice.title = titles[Random().nextInt(titles.length)];
-    _addLog('✅ 标题重新生成完成');
     notifyListeners();
   }
 }

@@ -106,7 +106,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 children: [
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: () => provider.testBotConnection(),
+                      onPressed: () {
+                        // 先保存配置再测试
+                        _save();
+                        Future.delayed(const Duration(milliseconds: 200), () {
+                          provider.testBotConnection();
+                        });
+                      },
                       icon: provider.isConnecting
                           ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
                           : const Icon(Icons.link_rounded, size: 16),
@@ -132,6 +138,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                 ],
               ),
+              if (provider.botConfig.isConnected) ...[
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () async {
+                      final ok = await provider.sendTestMessage();
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(ok ? '✅ 测试消息发送成功！请查看你的频道' : '❌ 测试消息发送失败，请查看日志'),
+                            backgroundColor: ok ? AppTheme.success : Colors.red,
+                          ),
+                        );
+                      }
+                    },
+                    icon: const Icon(Icons.send_rounded, size: 16),
+                    label: const Text('发送测试消息到频道'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppTheme.success,
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      textStyle: const TextStyle(fontSize: 13),
+                    ),
+                  ),
+                ),
+              ],
               const SizedBox(height: 12),
               Container(
                 padding: const EdgeInsets.all(12),

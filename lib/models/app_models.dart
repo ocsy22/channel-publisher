@@ -1,32 +1,13 @@
 import 'package:flutter/material.dart';
+import '../services/caption_service.dart';
 
 // ==================== 枚举 ====================
+enum VideoStatus { pending, processing, ready, publishing, published, failed }
+enum TaskType { slice, cover, caption, publish }
+enum TaskStatus { waiting, running, done, error }
+enum CoverStyle { firstFrame, bestFrame, middleFrame, custom }
 
-enum VideoStatus {
-  pending,    // 待处理
-  processing, // 处理中
-  ready,      // 已就绪
-  publishing, // 发布中
-  published,  // 已发布
-  failed,     // 失败
-}
-
-enum TaskType {
-  slice,      // 切片
-  cover,      // 封面
-  caption,    // 文案
-  publish,    // 发布
-}
-
-enum TaskStatus {
-  waiting,
-  running,
-  done,
-  error,
-}
-
-// ==================== 模型 ====================
-
+// ==================== BotConfig ====================
 class BotConfig {
   String botToken;
   String channelId;
@@ -34,7 +15,7 @@ class BotConfig {
   bool isConnected;
   String? aiApiKey;
   String? aiModel;
-  int publishInterval; // 发布间隔（分钟）
+  int publishInterval;
   bool autoPublish;
 
   BotConfig({
@@ -44,7 +25,7 @@ class BotConfig {
     this.isConnected = false,
     this.aiApiKey,
     this.aiModel = 'gpt-3.5-turbo',
-    this.publishInterval = 30,
+    this.publishInterval = 10,
     this.autoPublish = false,
   });
 
@@ -64,15 +45,17 @@ class BotConfig {
     channelName: json['channelName'] ?? '',
     aiApiKey: json['aiApiKey'] ?? '',
     aiModel: json['aiModel'] ?? 'gpt-3.5-turbo',
-    publishInterval: json['publishInterval'] ?? 30,
+    publishInterval: json['publishInterval'] ?? 10,
     autoPublish: json['autoPublish'] ?? false,
   );
 }
 
+// ==================== VideoSlice ====================
 class VideoSlice {
   final String id;
   final String originalVideoId;
   final String fileName;
+  String? realPath;        // 切片后的真实文件路径
   final double startTime;
   final double endTime;
   double duration;
@@ -88,6 +71,7 @@ class VideoSlice {
     required this.id,
     required this.originalVideoId,
     required this.fileName,
+    this.realPath,
     required this.startTime,
     required this.endTime,
     this.duration = 0,
@@ -101,60 +85,17 @@ class VideoSlice {
   });
 }
 
-class VideoFile {
-  final String id;
-  final String path;
-  final String fileName;
-  final double duration;
-  final int fileSize;
-  VideoStatus status;
-  double progress;
-  String? errorMessage;
-  List<VideoSlice> slices;
-  SliceConfig sliceConfig;
-  DateTime addedAt;
-  String? thumbnailPath;
-
-  VideoFile({
-    required this.id,
-    required this.path,
-    required this.fileName,
-    required this.duration,
-    required this.fileSize,
-    this.status = VideoStatus.pending,
-    this.progress = 0,
-    this.errorMessage,
-    List<VideoSlice>? slices,
-    SliceConfig? sliceConfig,
-    DateTime? addedAt,
-    this.thumbnailPath,
-  })  : slices = slices ?? [],
-        sliceConfig = sliceConfig ?? SliceConfig(),
-        addedAt = addedAt ?? DateTime.now();
-
-  String get formattedDuration {
-    final mins = duration ~/ 60;
-    final secs = (duration % 60).toInt();
-    return '${mins.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}';
-  }
-
-  String get formattedSize {
-    if (fileSize < 1024 * 1024) {
-      return '${(fileSize / 1024).toStringAsFixed(1)} KB';
-    }
-    return '${(fileSize / (1024 * 1024)).toStringAsFixed(1)} MB';
-  }
-}
-
+// ==================== SliceConfig ====================
 class SliceConfig {
-  double sliceDuration;   // 每片时长（秒）
-  bool autoSlice;         // 自动切片
-  bool generateCover;     // 生成封面
-  bool generateCaption;   // 生成文案
-  bool addWatermark;      // 添加水印
-  String watermarkText;   // 水印文字
-  String captionPrompt;   // 文案提示词
+  double sliceDuration;
+  bool autoSlice;
+  bool generateCover;
+  bool generateCaption;
+  bool addWatermark;
+  String watermarkText;
+  String captionPrompt;
   CoverStyle coverStyle;
+  CaptionMode captionMode;   // 普通 or 成人
 
   SliceConfig({
     this.sliceDuration = 60,
@@ -163,18 +104,57 @@ class SliceConfig {
     this.generateCaption = true,
     this.addWatermark = false,
     this.watermarkText = '',
-    this.captionPrompt = '请根据视频内容生成吸引人的标题和描述',
+    this.captionPrompt = '',
     this.coverStyle = CoverStyle.firstFrame,
+    this.captionMode = CaptionMode.normal,
   });
 }
 
-enum CoverStyle {
-  firstFrame,   // 第一帧
-  bestFrame,    // 最佳帧
-  middleFrame,  // 中间帧
-  custom,       // 自定义
+// ==================== VideoFile ====================
+class VideoFile {
+  final String id;
+  final String path;
+  final String fileName;
+  double duration;
+  int fileSize;
+  VideoStatus status;
+  double progress;
+  String? errorMessage;
+  List<VideoSlice> slices;
+  SliceConfig sliceConfig;
+  DateTime addedAt;
+
+  VideoFile({
+    required this.id,
+    required this.path,
+    required this.fileName,
+    this.duration = 0,
+    this.fileSize = 0,
+    this.status = VideoStatus.pending,
+    this.progress = 0,
+    this.errorMessage,
+    List<VideoSlice>? slices,
+    SliceConfig? sliceConfig,
+    DateTime? addedAt,
+  })  : slices = slices ?? [],
+        sliceConfig = sliceConfig ?? SliceConfig(),
+        addedAt = addedAt ?? DateTime.now();
+
+  String get formattedDuration {
+    if (duration <= 0) return '--:--';
+    final m = duration ~/ 60;
+    final s = (duration % 60).toInt();
+    return '${m.toString().padLeft(2,'0')}:${s.toString().padLeft(2,'0')}';
+  }
+
+  String get formattedSize {
+    if (fileSize <= 0) return '--';
+    if (fileSize < 1024 * 1024) return '${(fileSize / 1024).toStringAsFixed(1)} KB';
+    return '${(fileSize / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
 }
 
+// ==================== PublishTask ====================
 class PublishTask {
   final String id;
   final String videoSliceId;
@@ -185,7 +165,6 @@ class PublishTask {
   String message;
   DateTime createdAt;
   DateTime? completedAt;
-  String? errorMessage;
 
   PublishTask({
     required this.id,
@@ -197,10 +176,10 @@ class PublishTask {
     this.message = '等待中...',
     DateTime? createdAt,
     this.completedAt,
-    this.errorMessage,
   }) : createdAt = createdAt ?? DateTime.now();
 }
 
+// ==================== PublishRecord ====================
 class PublishRecord {
   final String id;
   final String channelId;
@@ -225,10 +204,35 @@ class PublishRecord {
     this.views = 0,
     this.forwards = 0,
   });
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'channelId': channelId,
+    'channelName': channelName,
+    'videoFileName': videoFileName,
+    'title': title,
+    'caption': caption,
+    'messageId': messageId,
+    'publishedAt': publishedAt.toIso8601String(),
+    'views': views,
+    'forwards': forwards,
+  };
+
+  factory PublishRecord.fromJson(Map<String, dynamic> json) => PublishRecord(
+    id: json['id'] ?? '',
+    channelId: json['channelId'] ?? '',
+    channelName: json['channelName'] ?? '',
+    videoFileName: json['videoFileName'] ?? '',
+    title: json['title'] ?? '',
+    caption: json['caption'] ?? '',
+    messageId: json['messageId'] ?? 0,
+    publishedAt: DateTime.tryParse(json['publishedAt'] ?? '') ?? DateTime.now(),
+    views: json['views'] ?? 0,
+    forwards: json['forwards'] ?? 0,
+  );
 }
 
-// ==================== 状态颜色 ====================
-
+// ==================== 扩展 ====================
 extension VideoStatusExtension on VideoStatus {
   Color get color {
     switch (this) {
@@ -240,7 +244,6 @@ extension VideoStatusExtension on VideoStatus {
       case VideoStatus.failed: return const Color(0xFFF44336);
     }
   }
-
   String get label {
     switch (this) {
       case VideoStatus.pending: return '待处理';
