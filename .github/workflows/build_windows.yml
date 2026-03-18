@@ -1,0 +1,82 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:   # 允许手动触发
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.4'
+          channel: 'stable'
+          cache: true
+
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze code
+        run: flutter analyze --no-fatal-infos
+        continue-on-error: true
+
+      - name: Build Windows Release
+        run: flutter build windows --release
+
+      - name: Show build output
+        run: |
+          echo "=== Build Output ==="
+          dir build\windows\x64\runner\Release
+
+      - name: Create release package
+        shell: pwsh
+        run: |
+          $releaseDir = "build\windows\x64\runner\Release"
+          $zipName = "ChannelPublisher-Windows-x64.zip"
+          Compress-Archive -Path "$releaseDir\*" -DestinationPath $zipName -Force
+          Write-Host "Package created: $zipName"
+          $size = (Get-Item $zipName).Length / 1MB
+          Write-Host ("Package size: {0:N1} MB" -f $size)
+
+      - name: Upload Windows EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChannelPublisher-Windows-x64
+          path: ChannelPublisher-Windows-x64.zip
+          retention-days: 30
+
+      - name: Create Release (on push to main)
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: "Channel Publisher v1.0.${{ github.run_number }}"
+          body: |
+            ## Channel Publisher - Windows 版本
+            
+            ### 下载说明
+            1. 下载 `ChannelPublisher-Windows-x64.zip`
+            2. 解压到任意目录
+            3. 双击 `channel_publisher.exe` 运行
+            
+            ### 功能
+            - Telegram Bot 自动发布
+            - 视频切片处理
+            - AI 自动生成文案
+            - 封面自动生成
+            - 定时发布队列
+          files: ChannelPublisher-Windows-x64.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
