@@ -95,15 +95,13 @@ class _VideoDetailPanelState extends State<VideoDetailPanel>
                   icon: const Icon(Icons.play_arrow_rounded, size: 16),
                   label: const Text('开始处理'),
                   style: ElevatedButton.styleFrom(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     textStyle: const TextStyle(fontSize: 13),
                   ),
                 ),
               if (video.status == VideoStatus.processing)
                 Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   decoration: BoxDecoration(
                     color: AppTheme.primary.withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(8),
@@ -135,8 +133,7 @@ class _VideoDetailPanelState extends State<VideoDetailPanel>
               Tab(text: '切片配置'),
               Tab(text: '多选发布'),
             ],
-            labelStyle:
-                const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
             unselectedLabelStyle: const TextStyle(fontSize: 13),
             labelColor: AppTheme.primary,
             unselectedLabelColor: AppTheme.textSecondary,
@@ -188,8 +185,7 @@ class _SlicesTab extends StatelessWidget {
                 color: AppTheme.textHint.withValues(alpha: 0.4)),
             const SizedBox(height: 12),
             const Text('尚未切片',
-                style:
-                    TextStyle(color: AppTheme.textSecondary, fontSize: 15)),
+                style: TextStyle(color: AppTheme.textSecondary, fontSize: 15)),
             const SizedBox(height: 4),
             const Text('点击"开始处理"按钮切片视频',
                 style: TextStyle(color: AppTheme.textHint, fontSize: 12)),
@@ -211,10 +207,8 @@ class _SlicesTab extends StatelessWidget {
           width: 260,
           child: Column(
             children: [
-              // 列表标题
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 decoration: const BoxDecoration(
                   border: Border(bottom: BorderSide(color: AppTheme.border)),
                 ),
@@ -246,13 +240,11 @@ class _SlicesTab extends StatelessWidget {
                           borderRadius: BorderRadius.circular(8),
                           border: isSelected
                               ? Border.all(
-                                  color:
-                                      AppTheme.primary.withValues(alpha: 0.3))
+                                  color: AppTheme.primary.withValues(alpha: 0.3))
                               : null,
                         ),
                         child: Row(
                           children: [
-                            // 封面缩略图
                             _CoverThumbnail(
                                 coverPath: slice.coverPath, index: i),
                             const SizedBox(width: 10),
@@ -282,8 +274,7 @@ class _SlicesTab extends StatelessWidget {
                               padding: const EdgeInsets.symmetric(
                                   horizontal: 5, vertical: 2),
                               decoration: BoxDecoration(
-                                color:
-                                    slice.status.color.withValues(alpha: 0.12),
+                                color: slice.status.color.withValues(alpha: 0.12),
                                 borderRadius: BorderRadius.circular(4),
                               ),
                               child: Text(slice.status.label,
@@ -381,12 +372,16 @@ class _SliceEditPanel extends StatefulWidget {
 class _SliceEditPanelState extends State<_SliceEditPanel> {
   late TextEditingController _titleCtrl;
   late TextEditingController _captionCtrl;
+  late TextEditingController _coverTextCtrl;
+  int _selectedCoverIndex = 0; // 当前选中的封面索引
 
   @override
   void initState() {
     super.initState();
     _titleCtrl = TextEditingController(text: widget.slice.title ?? '');
     _captionCtrl = TextEditingController(text: widget.slice.caption ?? '');
+    _coverTextCtrl = TextEditingController(text: widget.slice.coverText ?? '');
+    _selectedCoverIndex = 0;
   }
 
   @override
@@ -395,6 +390,8 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
     if (oldWidget.slice.id != widget.slice.id) {
       _titleCtrl.text = widget.slice.title ?? '';
       _captionCtrl.text = widget.slice.caption ?? '';
+      _coverTextCtrl.text = widget.slice.coverText ?? '';
+      _selectedCoverIndex = 0;
     }
   }
 
@@ -402,7 +399,29 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
   void dispose() {
     _titleCtrl.dispose();
     _captionCtrl.dispose();
+    _coverTextCtrl.dispose();
     super.dispose();
+  }
+
+  // 获取所有可选封面路径
+  List<String> _getAllCovers() {
+    final all = <String>[];
+    if (widget.slice.coverPath != null && widget.slice.coverPath!.isNotEmpty) {
+      all.add(widget.slice.coverPath!);
+    }
+    for (final p in widget.slice.extraCoverPaths) {
+      if (p.isNotEmpty && !all.contains(p)) all.add(p);
+    }
+    return all;
+  }
+
+  // 设置封面为当前选中索引的路径
+  void _selectCoverByIndex(AppProvider provider, int index) {
+    final covers = _getAllCovers();
+    if (index < covers.length) {
+      setState(() => _selectedCoverIndex = index);
+      provider.updateSliceCover(widget.slice.id, covers[index]);
+    }
   }
 
   @override
@@ -411,6 +430,8 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
     final slice = widget.slice;
     final isAdultMode =
         widget.video.sliceConfig.captionMode == CaptionMode.adult;
+    final allCovers = _getAllCovers();
+    final hasMultiCovers = allCovers.length > 1;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
@@ -422,39 +443,95 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               // 封面预览（可点击更换）
-              GestureDetector(
-                onTap: () async {
-                  final result = await FilePicker.platform.pickFiles(
-                    type: FileType.image,
-                    allowMultiple: false,
-                  );
-                  if (result != null &&
-                      result.files.isNotEmpty &&
-                      result.files.first.path != null) {
-                    provider.updateSliceCover(
-                        slice.id, result.files.first.path!);
-                    setState(() {});
-                  }
-                },
-                child: Container(
-                  width: 140,
-                  height: 96,
-                  decoration: BoxDecoration(
-                    color: AppTheme.primary.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: AppTheme.border),
+              Column(
+                children: [
+                  GestureDetector(
+                    onTap: () async {
+                      final result = await FilePicker.platform.pickFiles(
+                        type: FileType.image,
+                        allowMultiple: false,
+                      );
+                      if (result != null &&
+                          result.files.isNotEmpty &&
+                          result.files.first.path != null) {
+                        provider.updateSliceCover(
+                            slice.id, result.files.first.path!);
+                        setState(() {});
+                      }
+                    },
+                    child: Container(
+                      width: 140,
+                      height: 96,
+                      decoration: BoxDecoration(
+                        color: AppTheme.primary.withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: AppTheme.border),
+                      ),
+                      child: slice.coverPath != null && slice.coverPath!.isNotEmpty
+                          ? ClipRRect(
+                              borderRadius: BorderRadius.circular(7),
+                              child: Image.file(
+                                File(slice.coverPath!),
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) => _coverPlaceholder(),
+                              ),
+                            )
+                          : _coverPlaceholder(),
+                    ),
                   ),
-                  child: slice.coverPath != null && slice.coverPath!.isNotEmpty
-                      ? ClipRRect(
-                          borderRadius: BorderRadius.circular(7),
-                          child: Image.file(
-                            File(slice.coverPath!),
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) => _coverPlaceholder(),
-                          ),
-                        )
-                      : _coverPlaceholder(),
-                ),
+                  // 多封面选择器（有多张封面时显示）
+                  if (hasMultiCovers) ...[
+                    const SizedBox(height: 6),
+                    SizedBox(
+                      width: 140,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: List.generate(allCovers.length, (i) {
+                          final isActive = _selectedCoverIndex == i ||
+                              (slice.coverPath == allCovers[i]);
+                          return GestureDetector(
+                            onTap: () => _selectCoverByIndex(provider, i),
+                            child: Container(
+                              width: 24,
+                              height: 18,
+                              margin: const EdgeInsets.symmetric(horizontal: 2),
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(3),
+                                border: Border.all(
+                                  color: isActive ? AppTheme.primary : AppTheme.border,
+                                  width: isActive ? 1.5 : 1,
+                                ),
+                              ),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(2),
+                                child: Image.file(
+                                  File(allCovers[i]),
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) => Container(
+                                    color: AppTheme.primary.withValues(alpha: 0.1),
+                                    child: Center(
+                                      child: Text('${i + 1}',
+                                          style: const TextStyle(fontSize: 8, color: AppTheme.primary)),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          );
+                        }),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    SizedBox(
+                      width: 140,
+                      child: Text(
+                        '${allCovers.length} 张封面可选',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(fontSize: 9, color: AppTheme.textHint),
+                      ),
+                    ),
+                  ],
+                ],
               ),
               const SizedBox(width: 16),
               Expanded(
@@ -463,8 +540,7 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
                   children: [
                     _infoRow('文件名', slice.fileName),
                     _infoRow('时长', '${slice.duration.toStringAsFixed(0)} 秒'),
-                    _infoRow(
-                        '时间', '${_fmt(slice.startTime)} → ${_fmt(slice.endTime)}'),
+                    _infoRow('时间', '${_fmt(slice.startTime)} → ${_fmt(slice.endTime)}'),
                     _infoRow('路径', slice.realPath ?? '等待处理'),
                     const SizedBox(height: 8),
                     // 成人模式切换按钮
@@ -504,9 +580,7 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
                             const SizedBox(width: 4),
                             Icon(Icons.swap_horiz_rounded,
                                 size: 14,
-                                color: isAdultMode
-                                    ? Colors.red
-                                    : AppTheme.primary),
+                                color: isAdultMode ? Colors.red : AppTheme.primary),
                           ],
                         ),
                       ),
@@ -516,7 +590,49 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
               ),
             ],
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
+
+          // === 发布开关配置行（表情 + 封面文字）===
+          _PublishOptionsRow(slice: slice, video: widget.video),
+          const SizedBox(height: 16),
+
+          // === 封面文字（仅当封面文字开关开启且已启用时显示）===
+          if (provider.botConfig.enableCoverText) ...[
+            Row(
+              children: [
+                const Text('封面文字',
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: AppTheme.textPrimary)),
+                const Spacer(),
+                TextButton.icon(
+                  onPressed: () async {
+                    await provider.regenerateCoverText(slice);
+                    setState(() {
+                      _coverTextCtrl.text = slice.coverText ?? '';
+                    });
+                  },
+                  icon: const Icon(Icons.auto_awesome_rounded, size: 14),
+                  label: const Text('AI 生成', style: TextStyle(fontSize: 12)),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            TextField(
+              controller: _coverTextCtrl,
+              onChanged: (v) => provider.updateSliceCoverText(slice.id, v),
+              decoration: const InputDecoration(
+                  hintText: '留空则不叠加文字，或输入自定义封面文字...'),
+              style: const TextStyle(fontSize: 13),
+            ),
+            const SizedBox(height: 16),
+          ],
 
           // === 标题 ===
           Row(
@@ -537,8 +653,7 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
                 icon: const Icon(Icons.auto_awesome_rounded, size: 14),
                 label: const Text('AI 生成', style: TextStyle(fontSize: 12)),
                 style: TextButton.styleFrom(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   minimumSize: Size.zero,
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
@@ -566,14 +681,12 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
               if (isAdultMode)
                 Container(
                   margin: const EdgeInsets.only(right: 8),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(
                     color: Colors.red.withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(4),
                   ),
-                  child: const Text('🔞',
-                      style: TextStyle(fontSize: 11)),
+                  child: const Text('🔞', style: TextStyle(fontSize: 11)),
                 ),
               TextButton.icon(
                 onPressed: () async {
@@ -583,11 +696,9 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
                   });
                 },
                 icon: const Icon(Icons.auto_awesome_rounded, size: 14),
-                label: const Text('AI 重新生成',
-                    style: TextStyle(fontSize: 12)),
+                label: const Text('AI 重新生成', style: TextStyle(fontSize: 12)),
                 style: TextButton.styleFrom(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   minimumSize: Size.zero,
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
@@ -630,10 +741,9 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
                   setState(() {});
                 },
                 icon: const Icon(Icons.tag_rounded, size: 14),
-                label: const Text('重新生成', style: TextStyle(fontSize: 12)),
+                label: const Text('AI 生成标签', style: TextStyle(fontSize: 12)),
                 style: TextButton.styleFrom(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   minimumSize: Size.zero,
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
@@ -708,8 +818,7 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
               decoration: BoxDecoration(
                 color: Colors.red.withValues(alpha: 0.05),
                 borderRadius: BorderRadius.circular(6),
-                border:
-                    Border.all(color: Colors.red.withValues(alpha: 0.3)),
+                border: Border.all(color: Colors.red.withValues(alpha: 0.3)),
               ),
               child: Row(
                 children: [
@@ -717,8 +826,7 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
                   const SizedBox(width: 6),
                   Expanded(
                       child: Text(slice.errorMessage!,
-                          style: const TextStyle(
-                              fontSize: 11, color: Colors.red))),
+                          style: const TextStyle(fontSize: 11, color: Colors.red))),
                 ],
               ),
             ),
@@ -743,8 +851,7 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
     return const Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        Icon(Icons.add_photo_alternate_outlined,
-            color: AppTheme.primary, size: 28),
+        Icon(Icons.add_photo_alternate_outlined, color: AppTheme.primary, size: 28),
         SizedBox(height: 4),
         Text('点击更换封面',
             style: TextStyle(fontSize: 10, color: AppTheme.textSecondary)),
@@ -761,8 +868,7 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
           SizedBox(
               width: 44,
               child: Text(label,
-                  style: const TextStyle(
-                      fontSize: 11, color: AppTheme.textHint))),
+                  style: const TextStyle(fontSize: 11, color: AppTheme.textHint))),
           Expanded(
               child: Text(value,
                   style: const TextStyle(
@@ -784,6 +890,141 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
 
   String _fmtDate(DateTime dt) {
     return '${dt.month}/${dt.day} ${dt.hour}:${dt.minute.toString().padLeft(2, '0')}';
+  }
+}
+
+// ==================== 发布选项行（表情 + 封面文字开关）====================
+class _PublishOptionsRow extends StatelessWidget {
+  final VideoSlice slice;
+  final VideoFile video;
+
+  const _PublishOptionsRow({required this.slice, required this.video});
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = Provider.of<AppProvider>(context);
+    final config = provider.botConfig;
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppTheme.bgPage,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppTheme.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('发布选项',
+              style: TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w600, color: AppTheme.textSecondary)),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              // 表情开关
+              Expanded(
+                child: _OptionToggle(
+                  icon: '😄',
+                  label: '表情',
+                  desc: config.enableEmoji ? '已启用' : '已关闭',
+                  isActive: config.enableEmoji,
+                  onTap: () {
+                    provider.updateBotConfigPartial(config..enableEmoji = !config.enableEmoji);
+                  },
+                  activeColor: Colors.amber,
+                ),
+              ),
+              const SizedBox(width: 8),
+              // 标签开关
+              Expanded(
+                child: _OptionToggle(
+                  icon: '#',
+                  label: '标签',
+                  desc: config.enableTags ? '已启用' : '已关闭',
+                  isActive: config.enableTags,
+                  onTap: () {
+                    provider.updateBotConfigPartial(config..enableTags = !config.enableTags);
+                  },
+                  activeColor: Colors.blue,
+                ),
+              ),
+              const SizedBox(width: 8),
+              // 封面文字开关
+              Expanded(
+                child: _OptionToggle(
+                  icon: '📝',
+                  label: '封面文字',
+                  desc: config.enableCoverText ? 'AI生成' : '已关闭',
+                  isActive: config.enableCoverText,
+                  onTap: () {
+                    provider.updateBotConfigPartial(config..enableCoverText = !config.enableCoverText);
+                  },
+                  activeColor: const Color(0xFFFF5722),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _OptionToggle extends StatelessWidget {
+  final String icon;
+  final String label;
+  final String desc;
+  final bool isActive;
+  final VoidCallback onTap;
+  final Color activeColor;
+
+  const _OptionToggle({
+    required this.icon,
+    required this.label,
+    required this.desc,
+    required this.isActive,
+    required this.onTap,
+    required this.activeColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          color: isActive ? activeColor.withValues(alpha: 0.1) : AppTheme.bgCard,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: isActive ? activeColor.withValues(alpha: 0.4) : AppTheme.border,
+          ),
+        ),
+        child: Row(
+          children: [
+            Text(icon, style: const TextStyle(fontSize: 14)),
+            const SizedBox(width: 5),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label,
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: isActive ? activeColor : AppTheme.textPrimary)),
+                  Text(desc,
+                      style: TextStyle(
+                          fontSize: 9,
+                          color: isActive ? activeColor.withValues(alpha: 0.7) : AppTheme.textHint)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -836,7 +1077,6 @@ class _TagsEditorState extends State<_TagsEditor> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 当前标签 Chips
           if (widget.tags.isNotEmpty)
             Wrap(
               spacing: 6,
@@ -852,18 +1092,14 @@ class _TagsEditorState extends State<_TagsEditor> {
                         deleteIconColor: Colors.blue,
                         onDeleted: () => _removeTag(tag),
                         backgroundColor: Colors.blue.withValues(alpha: 0.08),
-                        side: BorderSide(
-                            color: Colors.blue.withValues(alpha: 0.3)),
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 2, vertical: 0),
+                        side: BorderSide(color: Colors.blue.withValues(alpha: 0.3)),
+                        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 0),
                         visualDensity: VisualDensity.compact,
-                        materialTapTargetSize:
-                            MaterialTapTargetSize.shrinkWrap,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                       ))
                   .toList(),
             ),
           if (widget.tags.isNotEmpty) const SizedBox(height: 8),
-          // 输入新标签
           Row(
             children: [
               Expanded(
@@ -894,7 +1130,7 @@ class _TagsEditorState extends State<_TagsEditor> {
             const Padding(
               padding: EdgeInsets.only(top: 4),
               child: Text(
-                '暂无标签 · 点击"重新生成"自动生成或手动输入',
+                '暂无标签 · 点击"AI 生成标签"自动生成或手动输入',
                 style: TextStyle(fontSize: 11, color: AppTheme.textHint),
               ),
             ),
@@ -977,8 +1213,7 @@ class _SliceConfigTabState extends State<_SliceConfigTab> {
                         _config.captionMode == CaptionMode.adult
                             ? 'AI 将生成18+暗示性标题和文案'
                             : 'AI 将生成普通吸引性标题和文案',
-                        style: const TextStyle(
-                            fontSize: 11, color: AppTheme.textHint),
+                        style: const TextStyle(fontSize: 11, color: AppTheme.textHint),
                       ),
                     ],
                   ),
@@ -986,8 +1221,7 @@ class _SliceConfigTabState extends State<_SliceConfigTab> {
                 Switch(
                   value: _config.captionMode == CaptionMode.adult,
                   onChanged: (v) => setState(() {
-                    _config.captionMode =
-                        v ? CaptionMode.adult : CaptionMode.normal;
+                    _config.captionMode = v ? CaptionMode.adult : CaptionMode.normal;
                     _save(provider);
                   }),
                   activeThumbColor: Colors.red,
@@ -1001,13 +1235,8 @@ class _SliceConfigTabState extends State<_SliceConfigTab> {
           _sectionTitle('切片设置'),
           _card(Column(
             children: [
-              _switchRow(
-                  '自动切片',
-                  _config.autoSlice,
-                  (v) => setState(() {
-                        _config.autoSlice = v;
-                        _save(provider);
-                      })),
+              _switchRow('自动切片', _config.autoSlice,
+                  (v) => setState(() { _config.autoSlice = v; _save(provider); })),
               const Divider(),
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 8),
@@ -1015,9 +1244,7 @@ class _SliceConfigTabState extends State<_SliceConfigTab> {
                   children: [
                     const Expanded(
                         child: Text('每片时长（秒）',
-                            style: TextStyle(
-                                fontSize: 13,
-                                color: AppTheme.textPrimary))),
+                            style: TextStyle(fontSize: 13, color: AppTheme.textPrimary))),
                     SizedBox(
                       width: 120,
                       child: Slider(
@@ -1037,46 +1264,75 @@ class _SliceConfigTabState extends State<_SliceConfigTab> {
                         child: Text('${_config.sliceDuration.toInt()} 秒',
                             textAlign: TextAlign.right,
                             style: const TextStyle(
-                                fontSize: 13,
-                                color: AppTheme.textSecondary))),
+                                fontSize: 13, color: AppTheme.textSecondary))),
                   ],
                 ),
               ),
             ],
           )),
           const SizedBox(height: 16),
+
           _sectionTitle('封面设置'),
           _card(Column(
             children: [
-              _switchRow(
-                  '自动生成封面',
-                  _config.generateCover,
-                  (v) => setState(() {
-                        _config.generateCover = v;
-                        _save(provider);
-                      })),
+              _switchRow('自动生成封面', _config.generateCover,
+                  (v) => setState(() { _config.generateCover = v; _save(provider); })),
+              const Divider(),
+              // 额外封面张数
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  children: [
+                    const Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('额外封面张数',
+                              style: TextStyle(fontSize: 13, color: AppTheme.textPrimary)),
+                          Text('每个片段额外截取的封面数量，可在发布时选择',
+                              style: TextStyle(fontSize: 11, color: AppTheme.textHint)),
+                        ],
+                      ),
+                    ),
+                    SizedBox(
+                      width: 120,
+                      child: Slider(
+                        value: _config.extraCoverCount.toDouble().clamp(0, 4),
+                        min: 0,
+                        max: 4,
+                        divisions: 4,
+                        label: '+${_config.extraCoverCount} 张',
+                        onChanged: (v) => setState(() {
+                          _config.extraCoverCount = v.toInt();
+                          _save(provider);
+                        }),
+                        activeColor: const Color(0xFF4CAF50),
+                      ),
+                    ),
+                    SizedBox(
+                        width: 48,
+                        child: Text('+${_config.extraCoverCount} 张',
+                            textAlign: TextAlign.right,
+                            style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary))),
+                  ],
+                ),
+              ),
               const Divider(),
               Row(
                 children: [
-                  const Text('封面样式',
-                      style: TextStyle(fontSize: 13)),
+                  const Text('封面样式', style: TextStyle(fontSize: 13)),
                   const Spacer(),
                   DropdownButton<CoverStyle>(
                     value: _config.coverStyle,
                     underline: const SizedBox(),
-                    style: const TextStyle(
-                        fontSize: 13,
-                        color: AppTheme.textPrimary),
+                    style: const TextStyle(fontSize: 13, color: AppTheme.textPrimary),
                     items: const [
                       DropdownMenuItem(
-                          value: CoverStyle.firstFrame,
-                          child: Text('第一帧 (10%处)')),
+                          value: CoverStyle.firstFrame, child: Text('第一帧 (10%处)')),
                       DropdownMenuItem(
-                          value: CoverStyle.bestFrame,
-                          child: Text('最佳帧 (30%处)')),
+                          value: CoverStyle.bestFrame, child: Text('最佳帧 (30%处)')),
                       DropdownMenuItem(
-                          value: CoverStyle.middleFrame,
-                          child: Text('中间帧 (50%处)')),
+                          value: CoverStyle.middleFrame, child: Text('中间帧 (50%处)')),
                     ],
                     onChanged: (v) => setState(() {
                       if (v != null) {
@@ -1088,41 +1344,30 @@ class _SliceConfigTabState extends State<_SliceConfigTab> {
                 ],
               ),
               const Divider(),
-              _switchRow(
-                  '添加水印',
-                  _config.addWatermark,
-                  (v) => setState(() {
-                        _config.addWatermark = v;
-                        _save(provider);
-                      })),
+              _switchRow('添加水印', _config.addWatermark,
+                  (v) => setState(() { _config.addWatermark = v; _save(provider); })),
               if (_config.addWatermark) ...[
                 const SizedBox(height: 8),
                 TextField(
                   decoration: const InputDecoration(
-                      labelText: '水印文字',
-                      hintText: '例如：@my_channel'),
-                  onChanged: (v) => setState(() {
-                    _config.watermarkText = v;
-                    _save(provider);
-                  }),
-                  controller:
-                      TextEditingController(text: _config.watermarkText),
+                      labelText: '水印文字', hintText: '例如：@my_channel'),
+                  onChanged: (v) => setState(() { _config.watermarkText = v; _save(provider); }),
+                  controller: TextEditingController(text: _config.watermarkText),
                   style: const TextStyle(fontSize: 13),
                 ),
               ],
             ],
           )),
           const SizedBox(height: 16),
+
           _sectionTitle('AI 文案设置'),
           _card(Column(
             children: [
-              _switchRow(
-                  '自动生成文案',
-                  _config.generateCaption,
-                  (v) => setState(() {
-                        _config.generateCaption = v;
-                        _save(provider);
-                      })),
+              _switchRow('自动生成文案', _config.generateCaption,
+                  (v) => setState(() { _config.generateCaption = v; _save(provider); })),
+              const Divider(),
+              _switchRow('自动生成标签', _config.generateTags,
+                  (v) => setState(() { _config.generateTags = v; _save(provider); })),
               const Divider(),
               const SizedBox(height: 8),
               TextField(
@@ -1130,12 +1375,8 @@ class _SliceConfigTabState extends State<_SliceConfigTab> {
                     labelText: '自定义提示词',
                     hintText: '留空使用默认模板，或输入自定义描述...'),
                 maxLines: 3,
-                onChanged: (v) => setState(() {
-                  _config.captionPrompt = v;
-                  _save(provider);
-                }),
-                controller:
-                    TextEditingController(text: _config.captionPrompt),
+                onChanged: (v) => setState(() { _config.captionPrompt = v; _save(provider); }),
+                controller: TextEditingController(text: _config.captionPrompt),
                 style: const TextStyle(fontSize: 13),
               ),
             ],
@@ -1150,9 +1391,7 @@ class _SliceConfigTabState extends State<_SliceConfigTab> {
       padding: const EdgeInsets.only(bottom: 8),
       child: Text(title,
           style: const TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w700,
-              color: AppTheme.textPrimary)),
+              fontSize: 14, fontWeight: FontWeight.w700, color: AppTheme.textPrimary)),
     );
   }
 
@@ -1173,8 +1412,7 @@ class _SliceConfigTabState extends State<_SliceConfigTab> {
       children: [
         Expanded(
             child: Text(label,
-                style: const TextStyle(
-                    fontSize: 13, color: AppTheme.textPrimary))),
+                style: const TextStyle(fontSize: 13, color: AppTheme.textPrimary))),
         Switch(
             value: value,
             onChanged: onChanged,
@@ -1207,9 +1445,8 @@ class _MultiPublishTabState extends State<_MultiPublishTab> {
     final provider = Provider.of<AppProvider>(context);
     final video = widget.video;
     final allSlices = video.slices;
-    final selectedCount = allSlices
-        .where((s) => provider.isSliceSelected(s.id))
-        .length;
+    final selectedCount =
+        allSlices.where((s) => provider.isSliceSelected(s.id)).length;
 
     return Column(
       children: [
@@ -1234,8 +1471,8 @@ class _MultiPublishTabState extends State<_MultiPublishTab> {
                     onPressed: () => provider.selectAllSlices(video),
                     style: TextButton.styleFrom(
                         minimumSize: Size.zero,
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 4)),
+                        padding:
+                            const EdgeInsets.symmetric(horizontal: 10, vertical: 4)),
                     child: const Text('全选', style: TextStyle(fontSize: 12)),
                   ),
                   const SizedBox(width: 4),
@@ -1243,8 +1480,8 @@ class _MultiPublishTabState extends State<_MultiPublishTab> {
                     onPressed: () => provider.clearSliceSelection(),
                     style: TextButton.styleFrom(
                         minimumSize: Size.zero,
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 4)),
+                        padding:
+                            const EdgeInsets.symmetric(horizontal: 10, vertical: 4)),
                     child: const Text('清空',
                         style: TextStyle(
                             fontSize: 12, color: AppTheme.textSecondary)),
@@ -1259,8 +1496,8 @@ class _MultiPublishTabState extends State<_MultiPublishTab> {
                       size: 16, color: AppTheme.textSecondary),
                   const SizedBox(width: 6),
                   const Text('共用封面',
-                      style: TextStyle(
-                          fontSize: 13, color: AppTheme.textPrimary)),
+                      style:
+                          TextStyle(fontSize: 13, color: AppTheme.textPrimary)),
                   const Spacer(),
                   if (_sharedCoverPath != null)
                     ClipRRect(
@@ -1283,25 +1520,22 @@ class _MultiPublishTabState extends State<_MultiPublishTab> {
                       if (result != null &&
                           result.files.isNotEmpty &&
                           result.files.first.path != null) {
-                        setState(
-                            () => _sharedCoverPath = result.files.first.path!);
+                        setState(() => _sharedCoverPath = result.files.first.path!);
                       }
                     },
-                    icon: const Icon(Icons.add_photo_alternate_rounded,
-                        size: 14),
+                    icon: const Icon(Icons.add_photo_alternate_rounded, size: 14),
                     label: Text(_sharedCoverPath != null ? '更换封面' : '选择封面',
                         style: const TextStyle(fontSize: 12)),
                     style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 6),
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                       minimumSize: Size.zero,
                     ),
                   ),
                   if (_sharedCoverPath != null) ...[
                     const SizedBox(width: 4),
                     IconButton(
-                      onPressed: () =>
-                          setState(() => _sharedCoverPath = null),
+                      onPressed: () => setState(() => _sharedCoverPath = null),
                       icon: const Icon(Icons.close_rounded, size: 16),
                       style: IconButton.styleFrom(
                           minimumSize: Size.zero,
@@ -1327,12 +1561,10 @@ class _MultiPublishTabState extends State<_MultiPublishTab> {
                       children: [
                         Text('媒体组发布（≤10个）',
                             style: TextStyle(
-                                fontSize: 12,
-                                color: AppTheme.textPrimary)),
+                                fontSize: 12, color: AppTheme.textPrimary)),
                         Text('一次发送多个视频为一组',
                             style: TextStyle(
-                                fontSize: 10,
-                                color: AppTheme.textHint)),
+                                fontSize: 10, color: AppTheme.textHint)),
                       ],
                     ),
                   ),
@@ -1395,14 +1627,15 @@ class _MultiPublishTabState extends State<_MultiPublishTab> {
                                           color: AppTheme.textPrimary),
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis),
-                                  Text(
-                                    slice.realPath ?? '等待处理',
-                                    style: const TextStyle(
-                                        fontSize: 10,
-                                        color: AppTheme.textSecondary),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
+                                  // 标签预览
+                                  if (slice.tags.isNotEmpty)
+                                    Text(
+                                      slice.tags.take(3).join(' '),
+                                      style: const TextStyle(
+                                          fontSize: 9, color: Colors.blue),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
                                 ],
                               ),
                             ),
@@ -1411,8 +1644,7 @@ class _MultiPublishTabState extends State<_MultiPublishTab> {
                               padding: const EdgeInsets.symmetric(
                                   horizontal: 5, vertical: 2),
                               decoration: BoxDecoration(
-                                color: slice.status.color
-                                    .withValues(alpha: 0.12),
+                                color: slice.status.color.withValues(alpha: 0.12),
                                 borderRadius: BorderRadius.circular(4),
                               ),
                               child: Text(slice.status.label,
@@ -1444,8 +1676,8 @@ class _MultiPublishTabState extends State<_MultiPublishTab> {
                   decoration: BoxDecoration(
                     color: Colors.orange.withValues(alpha: 0.08),
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                        color: Colors.orange.withValues(alpha: 0.3)),
+                    border:
+                        Border.all(color: Colors.orange.withValues(alpha: 0.3)),
                   ),
                   child: Row(
                     children: [
@@ -1454,8 +1686,8 @@ class _MultiPublishTabState extends State<_MultiPublishTab> {
                       const SizedBox(width: 6),
                       const Expanded(
                           child: Text('请先在设置页面连接 Telegram Bot',
-                              style: TextStyle(
-                                  fontSize: 12, color: Colors.orange))),
+                              style:
+                                  TextStyle(fontSize: 12, color: Colors.orange))),
                       TextButton(
                         onPressed: () => provider.setNav(4),
                         style: TextButton.styleFrom(
@@ -1471,22 +1703,22 @@ class _MultiPublishTabState extends State<_MultiPublishTab> {
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
-                  onPressed: (selectedCount > 0 &&
-                          provider.botConfig.isConnected)
-                      ? () {
-                          provider.publishSelectedSlices(
-                            sharedCoverPath: _sharedCoverPath,
-                            asMediaGroup: _useMediaGroup,
-                          );
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text(
-                                  '📤 开始发布 $selectedCount 个片段...'),
-                              backgroundColor: AppTheme.primary,
-                            ),
-                          );
-                        }
-                      : null,
+                  onPressed:
+                      (selectedCount > 0 && provider.botConfig.isConnected)
+                          ? () {
+                              provider.publishSelectedSlices(
+                                sharedCoverPath: _sharedCoverPath,
+                                asMediaGroup: _useMediaGroup,
+                              );
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                      '📤 开始发布 $selectedCount 个片段...'),
+                                  backgroundColor: AppTheme.primary,
+                                ),
+                              );
+                            }
+                          : null,
                   icon: const Icon(Icons.send_rounded, size: 18),
                   label: Text(
                     selectedCount > 0

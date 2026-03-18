@@ -198,54 +198,104 @@ class FfmpegService {
 
   // ==================== 封面截图 ====================
 
+  /// 提取单张封面
   Future<String?> extractCover({
     required String videoPath,
     required String outputPath,
-    double? atSeconds,          // null = 自动选最佳帧
+    double? atSeconds,
     int width = 1280,
     int height = 720,
     String? watermarkText,
+    String? overlayText,     // 叠加吸引文字（大字幕）
   }) async {
     final ffmpeg = await ffmpegPath;
-    
-    // 默认取10%处的帧（通常是较好的画面）
     final info = await getVideoInfo(videoPath);
     final seekTime = atSeconds ?? (info.duration > 0 ? info.duration * 0.1 : 1.0);
 
     await Directory(p.dirname(outputPath)).create(recursive: true);
 
-    List<String> args;
+    // 构建视频滤镜链
+    final filters = <String>[];
+    filters.add('scale=$width:$height:force_original_aspect_ratio=decrease');
+    filters.add('pad=$width:$height:(ow-iw)/2:(oh-ih)/2,setsar=1');
 
-    if (watermarkText != null && watermarkText.isNotEmpty) {
-      // 带水印
-      args = [
-        '-ss', seekTime.toStringAsFixed(3),
-        '-i', videoPath,
-        '-vframes', '1',
-        '-vf', 'scale=$width:$height:force_original_aspect_ratio=decrease,pad=$width:$height:(ow-iw)/2:(oh-ih)/2,drawtext=text=\'$watermarkText\':fontsize=36:fontcolor=white:x=(w-text_w)/2:y=h-th-20:shadowcolor=black:shadowx=2:shadowy=2',
-        '-q:v', '2',
-        '-y',
-        outputPath,
-      ];
-    } else {
-      args = [
-        '-ss', seekTime.toStringAsFixed(3),
-        '-i', videoPath,
-        '-vframes', '1',
-        '-vf', 'scale=$width:$height:force_original_aspect_ratio=decrease,pad=$width:$height:(ow-iw)/2:(oh-ih)/2',
-        '-q:v', '2',
-        '-y',
-        outputPath,
-      ];
+    // 叠加大字幕文字（吸引眼球用）
+    if (overlayText != null && overlayText.isNotEmpty) {
+      final safe = overlayText.replaceAll("'", "\\'").replaceAll(':', '\\:');
+      // 半透明黑底 + 大白字，居中偏下
+      filters.add(
+        'drawtext=text=\'$safe\':'
+        'fontsize=52:fontcolor=white:x=(w-text_w)/2:y=h*0.72:'
+        'shadowcolor=black:shadowx=3:shadowy=3:'
+        'box=1:boxcolor=black@0.55:boxborderw=12',
+      );
     }
 
-    final result = await Process.run(ffmpeg, args);
+    // 水印（频道名，小字）
+    if (watermarkText != null && watermarkText.isNotEmpty) {
+      final safe = watermarkText.replaceAll("'", "\\'").replaceAll(':', '\\:');
+      filters.add(
+        'drawtext=text=\'$safe\':'
+        'fontsize=28:fontcolor=white@0.85:x=w-text_w-20:y=h-th-16:'
+        'shadowcolor=black:shadowx=2:shadowy=2',
+      );
+    }
 
+    final vf = filters.join(',');
+    final args = [
+      '-ss', seekTime.toStringAsFixed(3),
+      '-i', videoPath,
+      '-vframes', '1',
+      '-vf', vf,
+      '-q:v', '2',
+      '-y',
+      outputPath,
+    ];
+
+    final result = await Process.run(ffmpeg, args);
     if (result.exitCode == 0 && await File(outputPath).exists()) {
       return outputPath;
     }
     if (kDebugMode) debugPrint('extractCover failed: ${result.stderr}');
     return null;
+  }
+
+  /// 批量提取多张封面（不同时间点）
+  /// [count] 额外封面数量 (1-4)
+  /// 返回所有成功的封面路径列表（第一个是主封面，其余是额外封面）
+  Future<List<String>> extractMultiCovers({
+    required String videoPath,
+    required String outputDir,
+    required String baseName,
+    int count = 3,           // 总共截取数量
+    String? watermarkText,
+    String? overlayText,     // 叠加大字
+  }) async {
+    final info = await getVideoInfo(videoPath);
+    if (info.duration <= 0) return [];
+
+    // 均匀分布时间点：10%, 30%, 50%, 70%, 90%
+    final positions = [0.10, 0.30, 0.50, 0.70, 0.90];
+    final results = <String>[];
+    final actualCount = count.clamp(1, 5);
+
+    for (int i = 0; i < actualCount; i++) {
+      final pos = positions[i % positions.length];
+      final seekTime = info.duration * pos;
+      final outputPath = p.join(outputDir, '${baseName}_cover_${i + 1}.jpg');
+
+      final path = await extractCover(
+        videoPath: videoPath,
+        outputPath: outputPath,
+        atSeconds: seekTime,
+        watermarkText: watermarkText,
+        overlayText: i == 0 ? overlayText : null, // 只在第一张加大字
+      );
+
+      if (path != null) results.add(path);
+    }
+
+    return results;
   }
 
   // ==================== 检查ffmpeg是否可用 ====================
