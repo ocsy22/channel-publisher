@@ -603,6 +603,51 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
                 hintText: '输入频道文案...', alignLabelWithHint: true),
             style: const TextStyle(fontSize: 13),
           ),
+          const SizedBox(height: 16),
+
+          // === 标签（Hashtag）===
+          Row(
+            children: [
+              const Text('发布标签',
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: AppTheme.textPrimary)),
+              const SizedBox(width: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.blue.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text('${slice.tags.length} 个',
+                    style: const TextStyle(fontSize: 10, color: Colors.blue)),
+              ),
+              const Spacer(),
+              TextButton.icon(
+                onPressed: () async {
+                  await provider.regenerateTags(slice);
+                  setState(() {});
+                },
+                icon: const Icon(Icons.tag_rounded, size: 14),
+                label: const Text('重新生成', style: TextStyle(fontSize: 12)),
+                style: TextButton.styleFrom(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          _TagsEditor(
+            tags: slice.tags,
+            onTagsChanged: (tags) {
+              provider.updateSliceTags(slice.id, tags);
+              setState(() {});
+            },
+          ),
           const SizedBox(height: 20),
 
           // === 发布按钮 ===
@@ -739,6 +784,123 @@ class _SliceEditPanelState extends State<_SliceEditPanel> {
 
   String _fmtDate(DateTime dt) {
     return '${dt.month}/${dt.day} ${dt.hour}:${dt.minute.toString().padLeft(2, '0')}';
+  }
+}
+
+// ==================== 标签编辑器组件 ====================
+class _TagsEditor extends StatefulWidget {
+  final List<String> tags;
+  final ValueChanged<List<String>> onTagsChanged;
+
+  const _TagsEditor({required this.tags, required this.onTagsChanged});
+
+  @override
+  State<_TagsEditor> createState() => _TagsEditorState();
+}
+
+class _TagsEditorState extends State<_TagsEditor> {
+  final _inputCtrl = TextEditingController();
+
+  void _addTag(String raw) {
+    final tag = raw.trim().isEmpty
+        ? ''
+        : (raw.trim().startsWith('#') ? raw.trim() : '#${raw.trim()}');
+    if (tag.isEmpty || tag == '#') return;
+    if (!widget.tags.contains(tag)) {
+      final newTags = List<String>.from(widget.tags)..add(tag);
+      widget.onTagsChanged(newTags);
+    }
+    _inputCtrl.clear();
+  }
+
+  void _removeTag(String tag) {
+    final newTags = List<String>.from(widget.tags)..remove(tag);
+    widget.onTagsChanged(newTags);
+  }
+
+  @override
+  void dispose() {
+    _inputCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: AppTheme.bgPage,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppTheme.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 当前标签 Chips
+          if (widget.tags.isNotEmpty)
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: widget.tags
+                  .map((tag) => Chip(
+                        label: Text(tag,
+                            style: const TextStyle(
+                                fontSize: 11,
+                                color: Colors.blue,
+                                fontWeight: FontWeight.w600)),
+                        deleteIcon: const Icon(Icons.close, size: 12),
+                        deleteIconColor: Colors.blue,
+                        onDeleted: () => _removeTag(tag),
+                        backgroundColor: Colors.blue.withValues(alpha: 0.08),
+                        side: BorderSide(
+                            color: Colors.blue.withValues(alpha: 0.3)),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 2, vertical: 0),
+                        visualDensity: VisualDensity.compact,
+                        materialTapTargetSize:
+                            MaterialTapTargetSize.shrinkWrap,
+                      ))
+                  .toList(),
+            ),
+          if (widget.tags.isNotEmpty) const SizedBox(height: 8),
+          // 输入新标签
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _inputCtrl,
+                  style: const TextStyle(fontSize: 12),
+                  decoration: const InputDecoration(
+                    hintText: '输入标签（如 自慰 或 #自慰）后按回车',
+                    hintStyle: TextStyle(fontSize: 11),
+                    contentPadding:
+                        EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    isDense: true,
+                  ),
+                  onSubmitted: _addTag,
+                ),
+              ),
+              const SizedBox(width: 6),
+              IconButton(
+                onPressed: () => _addTag(_inputCtrl.text),
+                icon: const Icon(Icons.add_circle_rounded,
+                    color: Colors.blue, size: 22),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+              ),
+            ],
+          ),
+          if (widget.tags.isEmpty)
+            const Padding(
+              padding: EdgeInsets.only(top: 4),
+              child: Text(
+                '暂无标签 · 点击"重新生成"自动生成或手动输入',
+                style: TextStyle(fontSize: 11, color: AppTheme.textHint),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }
 

@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-// dart:math removed - unused
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -59,9 +58,12 @@ class AppProvider extends ChangeNotifier {
 
   // 统计
   int get totalPublished => _history.length;
-  int get totalProcessing => _videos.where((v) => v.status == VideoStatus.processing).length;
-  int get totalPending => _videos.where((v) => v.status == VideoStatus.pending).length;
-  int get totalReady => _videos.where((v) => v.status == VideoStatus.ready).length;
+  int get totalProcessing =>
+      _videos.where((v) => v.status == VideoStatus.processing).length;
+  int get totalPending =>
+      _videos.where((v) => v.status == VideoStatus.pending).length;
+  int get totalReady =>
+      _videos.where((v) => v.status == VideoStatus.ready).length;
 
   AppProvider() {
     _loadSettings();
@@ -102,6 +104,8 @@ class AppProvider extends ChangeNotifier {
       final configJson = prefs.getString('bot_config');
       if (configJson != null) {
         _botConfig = BotConfig.fromJson(jsonDecode(configJson));
+        // 同步SSL设置到服务
+        _syncSslSetting();
       }
       _watchFolder = prefs.getString('watch_folder') ?? '';
       // 加载历史记录
@@ -114,6 +118,13 @@ class AppProvider extends ChangeNotifier {
     } catch (e) {
       if (kDebugMode) debugPrint('Load settings error: $e');
     }
+  }
+
+  /// 同步SSL设置到各服务
+  void _syncSslSetting() {
+    TelegramService.instance.setIgnoreSslErrors(_botConfig.ignoreSslErrors);
+    CaptionService.instance.setIgnoreSsl(_botConfig.ignoreSslErrors);
+    if (kDebugMode) debugPrint('SSL setting synced: ignoreSsl=${_botConfig.ignoreSslErrors}');
   }
 
   Future<void> saveSettings() async {
@@ -138,9 +149,11 @@ class AppProvider extends ChangeNotifier {
 
   void updateBotConfig(BotConfig config) {
     _botConfig = config;
-    // 重置连接状态
+    // 重置连接状态（token改变后需重新连接）
     _botConfig.isConnected = false;
     _botInfo = null;
+    // 同步SSL设置到服务层
+    _syncSslSetting();
     saveSettings();
     notifyListeners();
   }
@@ -152,6 +165,37 @@ class AppProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ==================== 获取输出目录 ====================
+
+  /// 获取切片/封面输出根目录
+  /// 优先使用用户自定义目录，否则使用系统AppData避免默认C盘
+  Future<String> _getOutputBaseDir() async {
+    // 用户自定义目录
+    if (_botConfig.outputDir.isNotEmpty) {
+      final customDir = Directory(_botConfig.outputDir);
+      try {
+        if (!customDir.existsSync()) {
+          customDir.createSync(recursive: true);
+        }
+        _addLog('📂 使用自定义输出目录: ${_botConfig.outputDir}');
+        return _botConfig.outputDir;
+      } catch (e) {
+        _addLog('⚠️ 自定义目录不可用: $e，使用默认目录');
+      }
+    }
+    // 默认使用系统ApplicationDocuments（通常不在C盘，或用户数据盘）
+    try {
+      final docsDir = await getApplicationDocumentsDirectory();
+      final outputDir = p.join(docsDir.path, 'ChannelPublisher');
+      await Directory(outputDir).create(recursive: true);
+      return outputDir;
+    } catch (_) {
+      // 最后回退到AppSupport
+      final appDir = await getApplicationSupportDirectory();
+      return appDir.path;
+    }
+  }
+
   // ==================== Bot 连接（真实 API）====================
   Future<bool> testBotConnection() async {
     if (_botConfig.botToken.isEmpty) {
@@ -161,22 +205,28 @@ class AppProvider extends ChangeNotifier {
     _isConnecting = true;
     notifyListeners();
 
+    // 同步最新SSL设置
+    _syncSslSetting();
+    _addLog('🔗 正在连接 Telegram (忽略SSL=${_botConfig.ignoreSslErrors})...');
+
     try {
-      _addLog('🔗 正在连接 Telegram...');
       final info = await TelegramService.instance.testConnection(_botConfig.botToken);
       _botInfo = info;
       _botConfig.isConnected = true;
-      _addLog('✅ Bot 连接成功！Bot: ${info?.username} (${info?.firstName})');
+      _addLog('✅ Bot 连接成功！Bot: ${info.username} (${info.firstName}) ID:${info.id}');
 
       // 获取频道信息
       if (_botConfig.channelId.isNotEmpty) {
+        _addLog('📢 正在获取频道信息...');
         final chInfo = await TelegramService.instance.getChannelInfo(
           _botConfig.botToken,
           _botConfig.channelId,
         );
         if (chInfo != null) {
           _botConfig.channelName = chInfo.title;
-          _addLog('📢 频道: ${chInfo.title} (${chInfo.id})');
+          _addLog('📢 频道: ${chInfo.title} (${chInfo.id}) 类型:${chInfo.type}');
+        } else {
+          _addLog('⚠️ 未能获取频道信息，请确认频道ID格式正确且Bot已加入频道');
         }
       }
 
@@ -238,15 +288,21 @@ class AppProvider extends ChangeNotifier {
 
   Future<void> scanFolder(String folderPath) async {
     setWatchFolder(folderPath);
-    final videoExts = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.ts'];
+    final videoExts = [
+      '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.ts'
+    ];
     int added = 0;
 
     if (!kIsWeb) {
       try {
         await for (final entityPath in listDirectory(folderPath)) {
-          final name = entityPath.split('/').last.split('\\').last;
-          final ext = name.contains('.') ? '.${name.split('.').last.toLowerCase()}' : '';
-          if (videoExts.contains(ext) && !_videos.any((v) => v.path == entityPath)) {
+          final name =
+              entityPath.split('/').last.split('\\').last;
+          final ext = name.contains('.')
+              ? '.${name.split('.').last.toLowerCase()}'
+              : '';
+          if (videoExts.contains(ext) &&
+              !_videos.any((v) => v.path == entityPath)) {
             final video = VideoFile(
               id: _uuid.v4(),
               path: entityPath,
@@ -264,7 +320,9 @@ class AppProvider extends ChangeNotifier {
             _loadVideoInfo(video);
           }
         }
-        if (added > 0 && _selectedVideo == null) _selectedVideo = _videos.first;
+        if (added > 0 && _selectedVideo == null) {
+          _selectedVideo = _videos.first;
+        }
         _addLog('📁 扫描完成，发现 $added 个视频');
         notifyListeners();
         return;
@@ -329,10 +387,12 @@ class AppProvider extends ChangeNotifier {
     _addLog('🎬 开始处理: ${video.fileName}');
 
     try {
-      // 输出目录
-      final appDir = await getApplicationSupportDirectory();
-      final outputDir = p.join(appDir.path, 'slices', video.id);
-      final coverDir = p.join(appDir.path, 'covers', video.id);
+      // 获取输出基础目录（自定义或默认）
+      final baseOutputDir = await _getOutputBaseDir();
+      final outputDir = p.join(baseOutputDir, 'slices', video.id);
+      final coverDir = p.join(baseOutputDir, 'covers', video.id);
+
+      _addLog('📂 输出目录: $baseOutputDir');
 
       final baseName = video.fileName.replaceAll(RegExp(r'\.[^.]+$'), '');
 
@@ -351,12 +411,12 @@ class AppProvider extends ChangeNotifier {
       );
 
       if (sliceResults.isEmpty) {
-        throw Exception('切片结果为空，请检查视频文件');
+        throw Exception('切片结果为空，请检查视频文件格式和ffmpeg是否正常');
       }
 
       _addLog('✅ 切片完成: ${sliceResults.length} 个片段');
 
-      // 2. 为每个片段生成封面+文案
+      // 2. 为每个片段生成封面+文案+标签
       for (int i = 0; i < sliceResults.length; i++) {
         final slice = sliceResults[i];
         video.progress = 0.6 + (i / sliceResults.length) * 0.4;
@@ -378,7 +438,7 @@ class AppProvider extends ChangeNotifier {
           }
         }
 
-        // 生成文案
+        // 生成文案+标签
         CaptionResult? captionResult;
         if (video.sliceConfig.generateCaption) {
           captionResult = await CaptionService.instance.generateCaption(
@@ -391,6 +451,20 @@ class AppProvider extends ChangeNotifier {
                 : null,
             partIndex: i + 1,
             totalParts: sliceResults.length,
+          );
+          if (captionResult.tags.isNotEmpty) {
+            _addLog('  🏷️ 标签: ${captionResult.tags.join(' ')}');
+          }
+        }
+
+        // 如果没有生成文案但需要标签，单独生成标签
+        List<String> tags = captionResult?.tags ?? [];
+        if (tags.isEmpty && video.sliceConfig.generateTags) {
+          tags = await CaptionService.instance.generateTags(
+            fileName: video.fileName,
+            mode: video.sliceConfig.captionMode,
+            apiKey: _botConfig.aiApiKey,
+            model: _botConfig.aiModel,
           );
         }
 
@@ -405,6 +479,7 @@ class AppProvider extends ChangeNotifier {
           coverPath: coverPath,
           title: captionResult?.title,
           caption: captionResult?.caption,
+          tags: tags,
           status: VideoStatus.ready,
           progress: 1.0,
         );
@@ -423,7 +498,8 @@ class AppProvider extends ChangeNotifier {
   }
 
   Future<void> processAllPending() async {
-    final pending = _videos.where((v) => v.status == VideoStatus.pending).toList();
+    final pending =
+        _videos.where((v) => v.status == VideoStatus.pending).toList();
     _addLog('🚀 开始批量处理 ${pending.length} 个视频...');
     for (final video in pending) {
       await processVideo(video);
@@ -437,6 +513,7 @@ class AppProvider extends ChangeNotifier {
       _addLog('❌ 请先连接Bot并填写频道ID');
       return false;
     }
+    _syncSslSetting();
     try {
       _addLog('📤 发送测试消息...');
       final msg = await TelegramService.instance.sendMessage(
@@ -461,6 +538,22 @@ class AppProvider extends ChangeNotifier {
 
   // ==================== 发布（真实 Telegram API）====================
 
+  /// 构建发布文案（标题+内容+标签）
+  String _buildCaption(VideoSlice slice) {
+    final parts = <String>[];
+    if (slice.title != null && slice.title!.isNotEmpty) {
+      parts.add('<b>${slice.title}</b>');
+    }
+    if (slice.caption != null && slice.caption!.isNotEmpty) {
+      parts.add(slice.caption!);
+    }
+    // 追加标签
+    if (slice.tags.isNotEmpty) {
+      parts.add('\n${slice.tags.join(' ')}');
+    }
+    return parts.join('\n\n');
+  }
+
   /// 发布单个切片
   Future<void> publishSlice(VideoSlice slice, VideoFile video) async {
     if (!_botConfig.isConnected) {
@@ -475,8 +568,10 @@ class AppProvider extends ChangeNotifier {
       _addLog('❌ 视频文件不存在: ${slice.realPath}');
       return;
     }
-    if (slice.status == VideoStatus.publishing || slice.status == VideoStatus.published) return;
+    if (slice.status == VideoStatus.publishing ||
+        slice.status == VideoStatus.published) return;
 
+    _syncSslSetting();
     slice.status = VideoStatus.publishing;
     notifyListeners();
 
@@ -493,13 +588,17 @@ class AppProvider extends ChangeNotifier {
 
     try {
       _addLog('📤 发布: ${slice.fileName} → ${_botConfig.channelId}');
+      if (slice.tags.isNotEmpty) {
+        _addLog('  🏷️ 标签: ${slice.tags.join(' ')}');
+      }
 
+      final caption = _buildCaption(slice);
       final msg = await TelegramService.instance.sendVideo(
         token: _botConfig.botToken,
         chatId: _botConfig.channelId,
         videoPath: slice.realPath!,
         coverPath: slice.coverPath,
-        caption: _buildCaption(slice),
+        caption: caption,
         parseMode: 'HTML',
         onProgress: (sent, total) {
           if (total > 0) {
@@ -520,10 +619,13 @@ class AppProvider extends ChangeNotifier {
       final record = PublishRecord(
         id: _uuid.v4(),
         channelId: _botConfig.channelId,
-        channelName: _botConfig.channelName.isNotEmpty ? _botConfig.channelName : _botConfig.channelId,
+        channelName: _botConfig.channelName.isNotEmpty
+            ? _botConfig.channelName
+            : _botConfig.channelId,
         videoFileName: slice.fileName,
         title: slice.title ?? '',
-        caption: slice.caption ?? '',
+        caption: caption,
+        tags: List.from(slice.tags),
         messageId: msg.messageId,
         publishedAt: DateTime.now(),
       );
@@ -582,7 +684,8 @@ class AppProvider extends ChangeNotifier {
         // 发布间隔
         if (_botConfig.publishInterval > 0 && entry != selectedSlices.last) {
           _addLog('⏱️ 等待 ${_botConfig.publishInterval} 秒...');
-          await Future.delayed(Duration(seconds: _botConfig.publishInterval));
+          await Future.delayed(
+              Duration(seconds: _botConfig.publishInterval));
         }
       }
     }
@@ -599,7 +702,9 @@ class AppProvider extends ChangeNotifier {
     final mediaItems = <MediaItem>[];
     for (int i = 0; i < slices.length; i++) {
       final slice = slices[i].key;
-      if (slice.realPath == null || !await File(slice.realPath!).exists()) continue;
+      if (slice.realPath == null || !await File(slice.realPath!).exists()) {
+        continue;
+      }
       mediaItems.add(MediaItem(
         filePath: slice.realPath!,
         coverPath: i == 0 ? (sharedCoverPath ?? slice.coverPath) : null,
@@ -613,7 +718,7 @@ class AppProvider extends ChangeNotifier {
     }
 
     try {
-      // 取第一个片段的文案
+      // 取第一个片段的文案和标签
       final firstSlice = slices.first.key;
       final caption = _buildCaption(firstSlice);
 
@@ -629,16 +734,21 @@ class AppProvider extends ChangeNotifier {
         final slice = slices[i].key;
         slice.status = VideoStatus.published;
         slice.publishedAt = DateTime.now();
-        _history.insert(0, PublishRecord(
-          id: _uuid.v4(),
-          channelId: _botConfig.channelId,
-          channelName: _botConfig.channelName.isNotEmpty ? _botConfig.channelName : _botConfig.channelId,
-          videoFileName: slice.fileName,
-          title: slice.title ?? '',
-          caption: caption,
-          messageId: msgs[i].messageId,
-          publishedAt: DateTime.now(),
-        ));
+        _history.insert(
+            0,
+            PublishRecord(
+              id: _uuid.v4(),
+              channelId: _botConfig.channelId,
+              channelName: _botConfig.channelName.isNotEmpty
+                  ? _botConfig.channelName
+                  : _botConfig.channelId,
+              videoFileName: slice.fileName,
+              title: slice.title ?? '',
+              caption: caption,
+              tags: List.from(slice.tags),
+              messageId: msgs[i].messageId,
+              publishedAt: DateTime.now(),
+            ));
       }
       _saveHistory();
       _addLog('✅ 媒体组发布成功，共 ${msgs.length} 条消息');
@@ -670,17 +780,6 @@ class AppProvider extends ChangeNotifier {
     }
   }
 
-  String _buildCaption(VideoSlice slice) {
-    final parts = <String>[];
-    if (slice.title != null && slice.title!.isNotEmpty) {
-      parts.add('<b>${slice.title}</b>');
-    }
-    if (slice.caption != null && slice.caption!.isNotEmpty) {
-      parts.add(slice.caption!);
-    }
-    return parts.join('\n\n');
-  }
-
   // ==================== 文案编辑 ====================
   void updateSliceTitle(String sliceId, String title) {
     _forEachSlice(sliceId, (s) => s.title = title);
@@ -692,6 +791,10 @@ class AppProvider extends ChangeNotifier {
 
   void updateSliceCover(String sliceId, String coverPath) {
     _forEachSlice(sliceId, (s) => s.coverPath = coverPath);
+  }
+
+  void updateSliceTags(String sliceId, List<String> tags) {
+    _forEachSlice(sliceId, (s) => s.tags = tags);
   }
 
   void _forEachSlice(String sliceId, void Function(VideoSlice) fn) {
@@ -709,7 +812,8 @@ class AppProvider extends ChangeNotifier {
   Future<void> regenerateCaption(VideoSlice slice) async {
     _addLog('🤖 AI 重新生成文案...');
     try {
-      final video = _videos.firstWhere((v) => v.id == slice.originalVideoId);
+      final video =
+          _videos.firstWhere((v) => v.id == slice.originalVideoId);
       final result = await CaptionService.instance.generateCaption(
         fileName: video.fileName,
         mode: video.sliceConfig.captionMode,
@@ -721,9 +825,33 @@ class AppProvider extends ChangeNotifier {
       );
       slice.title = result.title;
       slice.caption = result.caption;
+      if (result.tags.isNotEmpty) {
+        slice.tags = result.tags;
+        _addLog('🏷️ 标签更新: ${result.tags.join(' ')}');
+      }
       _addLog('✅ 文案已更新');
     } catch (e) {
       _addLog('❌ 文案生成失败: $e');
+    }
+    notifyListeners();
+  }
+
+  /// 重新生成标签
+  Future<void> regenerateTags(VideoSlice slice) async {
+    _addLog('🏷️ 重新生成标签...');
+    try {
+      final video =
+          _videos.firstWhere((v) => v.id == slice.originalVideoId);
+      final tags = await CaptionService.instance.generateTags(
+        fileName: video.fileName,
+        mode: video.sliceConfig.captionMode,
+        apiKey: _botConfig.aiApiKey,
+        model: _botConfig.aiModel,
+      );
+      slice.tags = tags;
+      _addLog('✅ 标签已更新: ${tags.join(' ')}');
+    } catch (e) {
+      _addLog('❌ 标签生成失败: $e');
     }
     notifyListeners();
   }
@@ -732,7 +860,8 @@ class AppProvider extends ChangeNotifier {
   Future<void> regenerateTitle(VideoSlice slice) async {
     _addLog('🤖 AI 重新生成标题...');
     try {
-      final video = _videos.firstWhere((v) => v.id == slice.originalVideoId);
+      final video =
+          _videos.firstWhere((v) => v.id == slice.originalVideoId);
       final result = await CaptionService.instance.generateCaption(
         fileName: video.fileName,
         mode: video.sliceConfig.captionMode,
@@ -761,9 +890,10 @@ class AppProvider extends ChangeNotifier {
         ? CaptionMode.normal
         : CaptionMode.adult;
     video.sliceConfig.captionMode = newMode;
-    _addLog('🔄 切换文案模式为: ${newMode == CaptionMode.adult ? "成人模式🔞" : "普通模式"}');
+    _addLog(
+        '🔄 切换文案模式为: ${newMode == CaptionMode.adult ? "成人模式🔞" : "普通模式"}');
     notifyListeners();
-    // 重新生成文案
+    // 重新生成文案+标签
     await regenerateCaption(slice);
   }
 
@@ -797,9 +927,12 @@ class AppProvider extends ChangeNotifier {
   // ==================== 日志 ====================
   void _addLog(String message) {
     final now = DateTime.now();
-    final t = '${now.hour.toString().padLeft(2,'0')}:${now.minute.toString().padLeft(2,'0')}:${now.second.toString().padLeft(2,'0')}';
+    final t =
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
     _logOutput = '[$t] $message\n$_logOutput';
-    if (_logOutput.length > 8000) _logOutput = _logOutput.substring(0, 8000);
+    if (_logOutput.length > 8000) {
+      _logOutput = _logOutput.substring(0, 8000);
+    }
     notifyListeners();
   }
 

@@ -17,6 +17,8 @@ class BotConfig {
   String? aiModel;
   int publishInterval;
   bool autoPublish;
+  bool ignoreSslErrors;   // 忽略SSL证书验证（代理/VPN环境）
+  String outputDir;       // 切片文件输出目录（空=使用默认AppData）
 
   BotConfig({
     this.botToken = '',
@@ -27,6 +29,8 @@ class BotConfig {
     this.aiModel = 'gpt-3.5-turbo',
     this.publishInterval = 10,
     this.autoPublish = false,
+    this.ignoreSslErrors = true,
+    this.outputDir = '',
   });
 
   Map<String, dynamic> toJson() => {
@@ -37,6 +41,8 @@ class BotConfig {
     'aiModel': aiModel ?? 'gpt-3.5-turbo',
     'publishInterval': publishInterval,
     'autoPublish': autoPublish,
+    'ignoreSslErrors': ignoreSslErrors,
+    'outputDir': outputDir,
   };
 
   factory BotConfig.fromJson(Map<String, dynamic> json) => BotConfig(
@@ -47,6 +53,8 @@ class BotConfig {
     aiModel: json['aiModel'] ?? 'gpt-3.5-turbo',
     publishInterval: json['publishInterval'] ?? 10,
     autoPublish: json['autoPublish'] ?? false,
+    ignoreSslErrors: json['ignoreSslErrors'] ?? true,
+    outputDir: json['outputDir'] ?? '',
   );
 }
 
@@ -55,13 +63,14 @@ class VideoSlice {
   final String id;
   final String originalVideoId;
   final String fileName;
-  String? realPath;        // 切片后的真实文件路径
+  String? realPath;
   final double startTime;
   final double endTime;
   double duration;
   String? coverPath;
   String? title;
   String? caption;
+  List<String> tags;        // 自动生成的hashtag标签
   VideoStatus status;
   double progress;
   String? errorMessage;
@@ -78,11 +87,12 @@ class VideoSlice {
     this.coverPath,
     this.title,
     this.caption,
+    List<String>? tags,
     this.status = VideoStatus.pending,
     this.progress = 0,
     this.errorMessage,
     this.publishedAt,
-  });
+  }) : tags = tags ?? [];
 }
 
 // ==================== SliceConfig ====================
@@ -91,17 +101,19 @@ class SliceConfig {
   bool autoSlice;
   bool generateCover;
   bool generateCaption;
+  bool generateTags;        // 自动生成标签
   bool addWatermark;
   String watermarkText;
   String captionPrompt;
   CoverStyle coverStyle;
-  CaptionMode captionMode;   // 普通 or 成人
+  CaptionMode captionMode;
 
   SliceConfig({
     this.sliceDuration = 60,
     this.autoSlice = true,
     this.generateCover = true,
     this.generateCaption = true,
+    this.generateTags = true,
     this.addWatermark = false,
     this.watermarkText = '',
     this.captionPrompt = '',
@@ -144,12 +156,14 @@ class VideoFile {
     if (duration <= 0) return '--:--';
     final m = duration ~/ 60;
     final s = (duration % 60).toInt();
-    return '${m.toString().padLeft(2,'0')}:${s.toString().padLeft(2,'0')}';
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
   String get formattedSize {
     if (fileSize <= 0) return '--';
-    if (fileSize < 1024 * 1024) return '${(fileSize / 1024).toStringAsFixed(1)} KB';
+    if (fileSize < 1024 * 1024) {
+      return '${(fileSize / 1024).toStringAsFixed(1)} KB';
+    }
     return '${(fileSize / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 }
@@ -187,6 +201,7 @@ class PublishRecord {
   final String videoFileName;
   final String title;
   final String caption;
+  final List<String> tags;
   final int messageId;
   DateTime publishedAt;
   int views;
@@ -199,11 +214,12 @@ class PublishRecord {
     required this.videoFileName,
     required this.title,
     required this.caption,
+    List<String>? tags,
     required this.messageId,
     required this.publishedAt,
     this.views = 0,
     this.forwards = 0,
-  });
+  }) : tags = tags ?? [];
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -212,24 +228,34 @@ class PublishRecord {
     'videoFileName': videoFileName,
     'title': title,
     'caption': caption,
+    'tags': tags,
     'messageId': messageId,
     'publishedAt': publishedAt.toIso8601String(),
     'views': views,
     'forwards': forwards,
   };
 
-  factory PublishRecord.fromJson(Map<String, dynamic> json) => PublishRecord(
-    id: json['id'] ?? '',
-    channelId: json['channelId'] ?? '',
-    channelName: json['channelName'] ?? '',
-    videoFileName: json['videoFileName'] ?? '',
-    title: json['title'] ?? '',
-    caption: json['caption'] ?? '',
-    messageId: json['messageId'] ?? 0,
-    publishedAt: DateTime.tryParse(json['publishedAt'] ?? '') ?? DateTime.now(),
-    views: json['views'] ?? 0,
-    forwards: json['forwards'] ?? 0,
-  );
+  factory PublishRecord.fromJson(Map<String, dynamic> json) {
+    final rawTags = json['tags'];
+    List<String> tags = [];
+    if (rawTags is List) {
+      tags = rawTags.map((e) => e.toString()).toList();
+    }
+    return PublishRecord(
+      id: json['id'] ?? '',
+      channelId: json['channelId'] ?? '',
+      channelName: json['channelName'] ?? '',
+      videoFileName: json['videoFileName'] ?? '',
+      title: json['title'] ?? '',
+      caption: json['caption'] ?? '',
+      tags: tags,
+      messageId: json['messageId'] ?? 0,
+      publishedAt:
+          DateTime.tryParse(json['publishedAt'] ?? '') ?? DateTime.now(),
+      views: json['views'] ?? 0,
+      forwards: json['forwards'] ?? 0,
+    );
+  }
 }
 
 // ==================== 扩展 ====================
@@ -244,6 +270,7 @@ extension VideoStatusExtension on VideoStatus {
       case VideoStatus.failed: return const Color(0xFFF44336);
     }
   }
+
   String get label {
     switch (this) {
       case VideoStatus.pending: return '待处理';
@@ -265,6 +292,7 @@ extension TaskStatusExtension on TaskStatus {
       case TaskStatus.error: return const Color(0xFFF44336);
     }
   }
+
   String get label {
     switch (this) {
       case TaskStatus.waiting: return '等待中';
