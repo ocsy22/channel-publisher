@@ -13,7 +13,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Flutter (manual install)
+      - name: Setup Flutter
         shell: pwsh
         run: |
           $flutterVersion = "3.35.4"
@@ -28,60 +28,36 @@ jobs:
 
       - name: Verify Flutter
         shell: pwsh
-        run: |
-          $env:PATH = "C:\flutter_sdk\flutter\bin;" + $env:PATH
-          flutter --version
+        run: flutter --version
 
       - name: Enable Windows desktop
         shell: pwsh
-        run: |
-          $env:PATH = "C:\flutter_sdk\flutter\bin;" + $env:PATH
-          flutter config --enable-windows-desktop
+        run: flutter config --enable-windows-desktop
 
       - name: Get dependencies
         shell: pwsh
-        run: |
-          $env:PATH = "C:\flutter_sdk\flutter\bin;" + $env:PATH
-          flutter pub get
+        run: flutter pub get
 
       - name: Build Windows Release
         shell: pwsh
         run: |
-          $env:PATH = "C:\flutter_sdk\flutter\bin;" + $env:PATH
           flutter build windows --release
           Write-Host "Build complete!"
-
-      - name: List output files
-        shell: pwsh
-        run: |
-          $releaseDir = "build\windows\x64\runner\Release"
-          if (Test-Path $releaseDir) {
-            Write-Host "=== Output files ==="
-            Get-ChildItem $releaseDir -Recurse | Select-Object FullName, Length
-          } else {
-            Write-Host "Release dir not found, searching..."
-            Get-ChildItem build -Recurse -Filter "*.exe" | Select-Object FullName
-          }
 
       - name: Package into ZIP
         shell: pwsh
         run: |
-          # 找到exe所在目录
           $exeFiles = Get-ChildItem -Path "build" -Recurse -Filter "channel_publisher.exe"
           if ($exeFiles.Count -eq 0) {
-            Write-Host "ERROR: channel_publisher.exe not found!"
+            Write-Host "ERROR: exe not found!"
             Get-ChildItem build -Recurse | Select-Object FullName
             exit 1
           }
           $releaseDir = $exeFiles[0].DirectoryName
           Write-Host "Found exe at: $releaseDir"
-          
-          # 打包
-          $zipName = "ChannelPublisher-Windows-x64.zip"
-          Compress-Archive -Path "$releaseDir\*" -DestinationPath $zipName -Force
-          
-          $sizeMB = [math]::Round((Get-Item $zipName).Length / 1MB, 1)
-          Write-Host "ZIP created: $zipName ($sizeMB MB)"
+          Compress-Archive -Path "$releaseDir\*" -DestinationPath "ChannelPublisher-Windows-x64.zip" -Force
+          $sizeMB = [math]::Round((Get-Item "ChannelPublisher-Windows-x64.zip").Length / 1MB, 1)
+          Write-Host "Package size: $sizeMB MB"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -89,29 +65,3 @@ jobs:
           name: ChannelPublisher-Windows-x64
           path: ChannelPublisher-Windows-x64.zip
           retention-days: 30
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: "Channel Publisher v1.0.${{ github.run_number }}"
-          body: |
-            ## ✅ Channel Publisher Windows版 - 自动构建
-
-            ### 下载使用
-            1. 下载 `ChannelPublisher-Windows-x64.zip`
-            2. 解压到任意目录
-            3. 双击 `channel_publisher.exe` 直接运行（无需安装）
-
-            ### 功能包含
-            - 📁 视频文件夹自动扫描
-            - ✂️ 视频自动切片
-            - 🖼️ 封面自动生成
-            - 🤖 AI自动生成文案标题
-            - 📤 Telegram Bot自动发布
-            - ⏱️ 定时发布队列
-          files: ChannelPublisher-Windows-x64.zip
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
