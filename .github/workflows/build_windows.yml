@@ -3,78 +3,113 @@ name: Build Windows EXE
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch:   # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build-windows:
     runs-on: windows-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.35.4'
-          channel: 'stable'
-          cache: true
+      - name: Setup Flutter (manual install)
+        shell: pwsh
+        run: |
+          $flutterVersion = "3.35.4"
+          $url = "https://storage.googleapis.com/flutter_infra_release/releases/stable/windows/flutter_windows_${flutterVersion}-stable.zip"
+          Write-Host "Downloading Flutter $flutterVersion ..."
+          Invoke-WebRequest -Uri $url -OutFile flutter.zip -UseBasicParsing
+          Write-Host "Extracting Flutter..."
+          Expand-Archive -Path flutter.zip -DestinationPath C:\flutter_sdk -Force
+          $flutterBin = "C:\flutter_sdk\flutter\bin"
+          echo "$flutterBin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Host "Flutter installed at $flutterBin"
+
+      - name: Verify Flutter
+        shell: pwsh
+        run: |
+          $env:PATH = "C:\flutter_sdk\flutter\bin;" + $env:PATH
+          flutter --version
 
       - name: Enable Windows desktop
-        run: flutter config --enable-windows-desktop
+        shell: pwsh
+        run: |
+          $env:PATH = "C:\flutter_sdk\flutter\bin;" + $env:PATH
+          flutter config --enable-windows-desktop
 
       - name: Get dependencies
-        run: flutter pub get
-
-      - name: Analyze code
-        run: flutter analyze --no-fatal-infos
-        continue-on-error: true
+        shell: pwsh
+        run: |
+          $env:PATH = "C:\flutter_sdk\flutter\bin;" + $env:PATH
+          flutter pub get
 
       - name: Build Windows Release
-        run: flutter build windows --release
-
-      - name: Show build output
+        shell: pwsh
         run: |
-          echo "=== Build Output ==="
-          dir build\windows\x64\runner\Release
+          $env:PATH = "C:\flutter_sdk\flutter\bin;" + $env:PATH
+          flutter build windows --release
+          Write-Host "Build complete!"
 
-      - name: Create release package
+      - name: List output files
         shell: pwsh
         run: |
           $releaseDir = "build\windows\x64\runner\Release"
+          if (Test-Path $releaseDir) {
+            Write-Host "=== Output files ==="
+            Get-ChildItem $releaseDir -Recurse | Select-Object FullName, Length
+          } else {
+            Write-Host "Release dir not found, searching..."
+            Get-ChildItem build -Recurse -Filter "*.exe" | Select-Object FullName
+          }
+
+      - name: Package into ZIP
+        shell: pwsh
+        run: |
+          # 找到exe所在目录
+          $exeFiles = Get-ChildItem -Path "build" -Recurse -Filter "channel_publisher.exe"
+          if ($exeFiles.Count -eq 0) {
+            Write-Host "ERROR: channel_publisher.exe not found!"
+            Get-ChildItem build -Recurse | Select-Object FullName
+            exit 1
+          }
+          $releaseDir = $exeFiles[0].DirectoryName
+          Write-Host "Found exe at: $releaseDir"
+          
+          # 打包
           $zipName = "ChannelPublisher-Windows-x64.zip"
           Compress-Archive -Path "$releaseDir\*" -DestinationPath $zipName -Force
-          Write-Host "Package created: $zipName"
-          $size = (Get-Item $zipName).Length / 1MB
-          Write-Host ("Package size: {0:N1} MB" -f $size)
+          
+          $sizeMB = [math]::Round((Get-Item $zipName).Length / 1MB, 1)
+          Write-Host "ZIP created: $zipName ($sizeMB MB)"
 
-      - name: Upload Windows EXE artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ChannelPublisher-Windows-x64
           path: ChannelPublisher-Windows-x64.zip
           retention-days: 30
 
-      - name: Create Release (on push to main)
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.${{ github.run_number }}
           name: "Channel Publisher v1.0.${{ github.run_number }}"
           body: |
-            ## Channel Publisher - Windows 版本
-            
-            ### 下载说明
+            ## ✅ Channel Publisher Windows版 - 自动构建
+
+            ### 下载使用
             1. 下载 `ChannelPublisher-Windows-x64.zip`
             2. 解压到任意目录
-            3. 双击 `channel_publisher.exe` 运行
-            
-            ### 功能
-            - Telegram Bot 自动发布
-            - 视频切片处理
-            - AI 自动生成文案
-            - 封面自动生成
-            - 定时发布队列
+            3. 双击 `channel_publisher.exe` 直接运行（无需安装）
+
+            ### 功能包含
+            - 📁 视频文件夹自动扫描
+            - ✂️ 视频自动切片
+            - 🖼️ 封面自动生成
+            - 🤖 AI自动生成文案标题
+            - 📤 Telegram Bot自动发布
+            - ⏱️ 定时发布队列
           files: ChannelPublisher-Windows-x64.zip
           draft: false
           prerelease: false
